@@ -5,6 +5,12 @@
 > Developing a data-driven monitoring approach to identify abnormal HPC system behaviour and investigate the potential for predicting failures before they disrupt computational workloads.
 
 ---
+# GROUP MEMBERS 
+
+Kamogelo Macena
+Lethabo Mafoko
+Lehlogonolo Phomane 
+Mamela Patric Abbi
 
 ## 1. Overview
 
