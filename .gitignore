@@ -1,28 +1,4 @@
-.env
-.env.*
-*.env
-!.env.example
-
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-
-node_modules/
-dist/
-build/
-
-*.log
-.DS_Store
-Thumbs.db
-
-
-# Local application data
-backend/*.db
-backend/*.sqlite
-backend/*.sqlite3
-
-# Environment and secrets
+# Environment variables and secrets
 .env
 .env.*
 *.env
@@ -33,45 +9,20 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
 
 # Frontend
 node_modules/
 dist/
 build/
 
-# Logs and OS files
+# Logs and generated files
 *.log
+coverage/
 .DS_Store
 Thumbs.db
 
-# Local application data
-backend/*.db
-backend/*.sqlite
-backend/*.sqlite3
-
-# Environment and secrets
-.env
-.env.*
-*.env
-!.env.example
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-
-# Frontend
-node_modules/
-dist/
-build/
-
-# Logs and OS files
-*.log
-.DS_Store
-Thumbs.db
-
-# All local database files
+# Local databases and SQLite files
 *.db
 *.sqlite
 *.sqlite3
