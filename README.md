@@ -1,4 +1,4 @@
-# Sol Plaatje A HPC AIOps Dashboard
+# Sol Plaatje A HPC Dashboard
 
 **HPC Predictive Monitoring and AIOps Platform**
 
