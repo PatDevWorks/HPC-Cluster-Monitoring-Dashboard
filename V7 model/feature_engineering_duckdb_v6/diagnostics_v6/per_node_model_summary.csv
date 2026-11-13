@@ -1,0 +1,5 @@
+node_id,clean_training_rows,features_before_constant_drop,features_after_constant_drop,constant_features_dropped,training_score_p99
+compute001,13264,28,26,"collector_shortfall_pct_mean, failed_active_collectors_max",0.6255335571724461
+compute002,13999,28,27,collector_shortfall_pct_mean,0.6262131669069395
+compute003,14029,28,27,collector_shortfall_pct_mean,0.6261314685365384
+headnode,13970,28,22,"collector_shortfall_pct_mean, failed_active_collectors_max, is_nonzero_disk_write_mib_s_mean, is_nonzero_iowait_pct_mean, node_down_in_minute, scrape_shortfall_in_minute",0.6212079509426756

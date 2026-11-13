@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   Flame,
+  LogOut,
   Menu,
   Monitor,
   Moon,
@@ -12,7 +13,6 @@ import {
   Shield,
   Sun,
 } from 'lucide-react';
-import { getAuthContext, setAdminToken, setOperatorRole } from '../api.js';
 import { useTheme } from '../context/ThemeContext.jsx';
 
 export default function HeaderBar({
@@ -23,33 +23,62 @@ export default function HeaderBar({
   onNavigate,
   onTogglePause,
   onOpenFaultLab,
+  user,
+  onLogout,
 }) {
   const { preference, setPreference } = useTheme();
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [role, setRoleState] = useState(() => getAuthContext().role);
-  const [tokenInput, setTokenInput] = useState(() => getAuthContext().token);
+
   const notifRef = useRef(null);
   const profileRef = useRef(null);
 
+  const role = user?.role || 'viewer';
+  const isAdmin = role === 'admin' || role === 'super_admin';
+  const roleLabel =
+    role === 'super_admin'
+      ? 'Super Administrator'
+      : role === 'admin'
+        ? 'Administrator'
+        : 'Viewer';
+
   useEffect(() => {
     const close = (e) => {
-      if (notifRef.current && !notifRef.current.contains(e.target)) setNotifOpen(false);
-      if (profileRef.current && !profileRef.current.contains(e.target)) setProfileOpen(false);
+      if (notifRef.current && !notifRef.current.contains(e.target)) {
+        setNotifOpen(false);
+      }
+
+      if (profileRef.current && !profileRef.current.contains(e.target)) {
+        setProfileOpen(false);
+      }
     };
+
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, []);
 
   const episodes = snapshot?.alert_episodes || [];
+
   const activeAlerts = episodes.filter(
     (e) => e.status === 'active' || e.status === 'acknowledged'
   );
-  const activeFaultCount = Object.keys(snapshot?.active_fault_injections || {}).length;
 
-  // Honest connection provenance badge
+  const activeFaultCount = Object.keys(
+    snapshot?.active_fault_injections || {}
+  ).length;
+
+  const displayName = user?.full_name || user?.email || 'Authenticated User';
+  const initials = displayName
+    .split(/[\s@._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join('');
+
+  // Telemetry connection status
   let sourceText = 'Connecting...';
   let sourceDot = 'bg-amber-400';
+
   if (snapshot) {
     if (snapshot.mode === 'live_prometheus') {
       if (snapshot.prometheus_connected) {
@@ -77,7 +106,8 @@ export default function HeaderBar({
       className="sticky top-0 z-30 backdrop-blur-md"
     >
       <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6">
-        {/* Left: Collapse Toggle + Platform Identity */}
+
+        {/* Left: Sidebar Toggle + Platform Identity */}
         <div className="flex items-center gap-3.5">
           <button
             onClick={() => {
@@ -98,6 +128,7 @@ export default function HeaderBar({
               <h1 className="text-base font-bold tracking-tight sm:text-lg">
                 Sol Plaatje A Dev Cluster Dashboard
               </h1>
+
               <span
                 onClick={() => onNavigate('settings')}
                 title="Click to configure telemetry source in Settings"
@@ -107,15 +138,17 @@ export default function HeaderBar({
                 {sourceText}
               </span>
             </div>
+
             <p className="text-[11.5px] spu-text-secondary">
               Monitor • Analyse • Predict • Optimise
             </p>
           </div>
         </div>
 
-        {/* Right: Theme Switcher + Notifications + Operator Menu */}
+        {/* Right: Theme + Notifications + User Profile */}
         <div className="flex items-center gap-2.5">
-          {/* Dark / System / Light Theme Switcher Pill */}
+
+          {/* Theme Switcher */}
           <div
             style={{
               backgroundColor: 'var(--bg-card-alt)',
@@ -132,6 +165,7 @@ export default function HeaderBar({
             ].map((opt) => {
               const Icon = opt.icon;
               const active = preference === opt.id;
+
               return (
                 <button
                   key={opt.id}
@@ -149,7 +183,7 @@ export default function HeaderBar({
             })}
           </div>
 
-          {/* Notification Bell Popover */}
+          {/* Notifications */}
           <div className="relative" ref={notifRef}>
             <button
               onClick={() => setNotifOpen((v) => !v)}
@@ -161,6 +195,7 @@ export default function HeaderBar({
               className="relative flex h-9 w-9 items-center justify-center rounded-full spu-text-secondary transition hover:border-[var(--accent-cyan)] hover:text-[var(--text-primary)]"
             >
               <Bell className="h-4 w-4" />
+
               {activeAlerts.length > 0 && (
                 <span className="absolute -top-1 -right-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white">
                   {activeAlerts.length}
@@ -169,9 +204,12 @@ export default function HeaderBar({
             </button>
 
             {notifOpen && (
-              <div className="spu-card absolute right-0 mt-2 w-80 p-3.5 z-50">
+              <div className="spu-card absolute right-0 z-50 mt-2 w-80 p-3.5">
                 <div className="flex items-center justify-between border-b pb-2 spu-border">
-                  <span className="text-xs font-bold">Active Cluster Notifications</span>
+                  <span className="text-xs font-bold">
+                    Active Cluster Notifications
+                  </span>
+
                   <button
                     onClick={() => {
                       setNotifOpen(false);
@@ -182,6 +220,7 @@ export default function HeaderBar({
                     Open Incidents →
                   </button>
                 </div>
+
                 <div className="mt-2.5 max-h-64 space-y-2 overflow-y-auto">
                   {activeAlerts.length === 0 ? (
                     <div className="py-5 text-center text-xs spu-text-secondary">
@@ -199,10 +238,12 @@ export default function HeaderBar({
                       >
                         <div className="flex items-center justify-between font-semibold">
                           <span>{ep.title}</span>
+
                           <span className="font-mono text-[10px] spu-text-muted">
                             {ep.last_seen_utc?.slice(11, 19)}
                           </span>
                         </div>
+
                         <p className="mt-1 line-clamp-2 text-[11px] spu-text-secondary">
                           {ep.summary}
                         </p>
@@ -214,118 +255,115 @@ export default function HeaderBar({
             )}
           </div>
 
-          {/* Operator Avatar & Quick System Controls */}
+          {/* Authenticated User Profile */}
           <div className="relative" ref={profileRef}>
             <button
               onClick={() => setProfileOpen((v) => !v)}
-              title="HPC Operator Controls"
+              title="Account and session information"
+              aria-label="Open account menu"
               className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-500/85 text-xs font-bold text-white ring-1 ring-indigo-400/50 transition hover:bg-indigo-500"
             >
-              SPU
+              {initials || 'SPU'}
             </button>
 
             {profileOpen && (
-              <div className="spu-card absolute right-0 mt-2 w-68 p-2.5 z-50 text-xs">
+              <div className="spu-card absolute right-0 z-50 mt-2 w-72 p-2.5 text-xs">
+
+                {/* Account Information */}
                 <div className="border-b px-2.5 py-2 spu-border">
-                  <div className="flex items-center justify-between font-bold">
-                    <span>Sol Plaatje A</span>
+                  <div className="font-bold">
+                    {displayName}
+                  </div>
+
+                  {user?.full_name && user?.email && (
+                    <div className="mt-0.5 break-all text-[11px] spu-text-muted">
+                      {user.email}
+                    </div>
+                  )}
+
+                  <div className="mt-2 flex items-center justify-between">
+                    <span className="font-semibold">
+                      Sol Plaatje A
+                    </span>
+
                     <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] ${
-                        role === 'admin'
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                        isAdmin
                           ? 'bg-cyan-500/15 text-[var(--accent-cyan)]'
                           : 'bg-slate-500/20 spu-text-secondary'
                       }`}
                     >
-                      {role === 'admin' ? 'Administrator' : 'Viewer'}
+                      {roleLabel}
                     </span>
                   </div>
-                  <div className="mt-0.5 text-[11px] spu-text-muted">
-                    {wsConnected ? 'WebSocket Stream Connected' : 'Stream Reconnecting'}
+
+                  <div className="mt-1 flex items-center gap-1.5 text-[11px] spu-text-muted">
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        wsConnected ? 'bg-emerald-400' : 'bg-amber-400'
+                      }`}
+                    />
+                    {wsConnected
+                      ? 'WebSocket Stream Connected'
+                      : 'Stream Reconnecting'}
                   </div>
 
-                  {/* Role-Based Access Switcher */}
-                  <div className="mt-2.5 flex items-center gap-1 rounded-lg border p-0.5 spu-border">
-                    {[
-                      { id: 'admin', label: 'Admin' },
-                      { id: 'viewer', label: 'Read-Only' },
-                    ].map((r) => (
-                      <button
-                        key={r.id}
-                        onClick={() => {
-                          setRoleState(r.id);
-                          setOperatorRole(r.id);
-                        }}
-                        className={`flex-1 rounded-md py-1 text-[11px] font-semibold transition ${
-                          role === r.id
-                            ? 'bg-[var(--accent-cyan-strong)] text-white'
-                            : 'spu-text-secondary hover:text-[var(--text-primary)]'
-                        }`}
-                      >
-                        <Shield className="mr-1 inline h-3 w-3" />
-                        {r.label}
-                      </button>
-                    ))}
+                  <div className="mt-2 flex items-center gap-1.5 text-[10px] spu-text-muted">
+                    <Shield className="h-3 w-3" />
+                    Permissions assigned by server
                   </div>
-
-                  {snapshot?.admin_token_required && (
-                    <div className="mt-2">
-                      <label className="block text-[10px] font-semibold spu-text-muted">
-                        Server Admin Token
-                      </label>
-                      <input
-                        type="password"
-                        value={tokenInput}
-                        onChange={(e) => {
-                          setTokenInput(e.target.value);
-                          setAdminToken(e.target.value);
-                        }}
-                        placeholder="Enter HPC_ADMIN_TOKEN"
-                        className="spu-input mt-1 w-full rounded-md px-2 py-1 text-[11px]"
-                      />
-                    </div>
-                  )}
                 </div>
-                <div className="mt-1 space-y-1">
-                  <button
-                    onClick={() => {
-                      onTogglePause();
-                      setProfileOpen(false);
-                    }}
-                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-[var(--bg-hover)]"
-                  >
-                    {snapshot?.paused ? (
-                      <>
-                        <Play className="h-3.5 w-3.5 text-emerald-400" />
-                        Resume Live Stream
-                      </>
-                    ) : (
-                      <>
-                        <Pause className="h-3.5 w-3.5 text-amber-400" />
-                        Pause Live Stream
-                      </>
-                    )}
-                  </button>
 
-                  {snapshot?.mode === 'live_cluster_sim' && (
-                    <button
-                      onClick={() => {
-                        onOpenFaultLab();
-                        setProfileOpen(false);
-                      }}
-                      className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition hover:bg-[var(--bg-hover)]"
-                    >
-                      <span className="flex items-center gap-2">
-                        <Flame className="h-3.5 w-3.5 text-rose-400" />
-                        Fault Injection Lab
-                      </span>
-                      {activeFaultCount > 0 && (
-                        <span className="rounded-full bg-rose-500 px-1.5 text-[10px] font-bold text-white">
-                          {activeFaultCount}
-                        </span>
+                {/* System Controls */}
+                <div className="mt-1 space-y-1">
+
+                  {/* Admin-only operational controls */}
+                  {isAdmin && (
+                    <>
+                      <button
+                        onClick={() => {
+                          onTogglePause();
+                          setProfileOpen(false);
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-[var(--bg-hover)]"
+                      >
+                        {snapshot?.paused ? (
+                          <>
+                            <Play className="h-3.5 w-3.5 text-emerald-400" />
+                            Resume Live Stream
+                          </>
+                        ) : (
+                          <>
+                            <Pause className="h-3.5 w-3.5 text-amber-400" />
+                            Pause Live Stream
+                          </>
+                        )}
+                      </button>
+
+                      {snapshot?.mode === 'live_cluster_sim' && (
+                        <button
+                          onClick={() => {
+                            onOpenFaultLab();
+                            setProfileOpen(false);
+                          }}
+                          className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition hover:bg-[var(--bg-hover)]"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Flame className="h-3.5 w-3.5 text-rose-400" />
+                            Fault Injection Lab
+                          </span>
+
+                          {activeFaultCount > 0 && (
+                            <span className="rounded-full bg-rose-500 px-1.5 text-[10px] font-bold text-white">
+                              {activeFaultCount}
+                            </span>
+                          )}
+                        </button>
                       )}
-                    </button>
+                    </>
                   )}
 
+                  {/* Settings */}
                   <button
                     onClick={() => {
                       onNavigate('settings');
@@ -347,6 +385,24 @@ export default function HeaderBar({
                     <Settings className="h-3.5 w-3.5 spu-text-secondary" />
                     Platform Settings
                   </button>
+
+                  {/* Logout */}
+                  {onLogout && (
+                    <>
+                      <div className="my-1 border-t spu-border" />
+
+                      <button
+                        onClick={() => {
+                          setProfileOpen(false);
+                          onLogout();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left font-semibold text-rose-400 transition hover:bg-rose-500/10"
+                      >
+                        <LogOut className="h-3.5 w-3.5" />
+                        Sign Out
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -354,7 +410,7 @@ export default function HeaderBar({
         </div>
       </div>
 
-      {/* Prominent Disconnection / Synthetic Notice Banner when applicable */}
+      {/* Telemetry Warning */}
       {snapshot?.source_warning && (
         <div className="border-t border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-center text-xs text-amber-400">
           {snapshot.source_warning}

@@ -1,0 +1,8 @@
+area,observation,impact
+Validation labels,Validation contains zero operational-event positives.,The deployment threshold falls back to the clean-training score percentile; it is not validation-optimised.
+Headnode,"3,024 test rows, 579 flags, and zero operational positives.",Headnode operational anomaly candidates are not validated by recorded positive labels; investigate role-specific behaviour and improve labels.
+Feature quality,Constant clean-training features: collector_shortfall_pct_mean,These features add no separation within the clean training baseline; review their source and consider them for V7.
+Event semantics,events.csv has no rows with is_failure=1.,The event register cannot currently substantiate failure-specific recall; describe event-window correlation instead.
+Score interpretation,Isolation Forest anomaly scores are uncalibrated ranking scores.,Do not present them as failure probabilities.
+Temporal interpretation,Event correlation uses -5 to +10 minute windows around recorded events.,A hit does not demonstrate a pre-failure prediction or lead time.
+Generalisation,The input contains 4 nodes over 15.0 calendar days.,V6 should remain an experimental baseline until evaluated on longer and future unseen periods.

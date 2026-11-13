@@ -1,0 +1,27 @@
+{
+  "source_scored_file": "C:\\Users\\Admin\\Documents\\chpc\\capstone project\\data\\feature_engineering_duckdb_v6\\anomaly_timeline_scored.parquet",
+  "source_model_input_file": "C:\\Users\\Admin\\Documents\\chpc\\capstone project\\data\\feature_engineering_duckdb_v6\\model_input_1min_v6.parquet",
+  "source_labels_file": "C:\\Users\\Admin\\Documents\\chpc\\capstone project\\data\\feature_engineering_duckdb_v6\\labels_1min_v6.parquet",
+  "evaluation_target": "operational_event_window",
+  "test_rows": 12096,
+  "test_positive_rows": 53,
+  "test_flagged_rows": 1136,
+  "test_false_positive_rows": 1127,
+  "feature_count_in_current_model": 28,
+  "constant_features_in_clean_train": [
+    "collector_shortfall_pct_mean"
+  ],
+  "threshold_percentiles_explored": [
+    99.0,
+    99.5,
+    99.9,
+    99.95
+  ],
+  "persistence_minutes_explored": [
+    2,
+    3,
+    5
+  ],
+  "per_node_models_run": true,
+  "warning": "Diagnostic analysis only. The October 29-31 test period has already been inspected; reserve a future untouched period for final evaluation."
+}

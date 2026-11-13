@@ -7,3 +7,4 @@ numpy>=2.1.0
 pandas>=2.2.3
 scikit-learn>=1.5.2
 joblib>=1.4.2
+pwdlib[argon2]>=0.2.1

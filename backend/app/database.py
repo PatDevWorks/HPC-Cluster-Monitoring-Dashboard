@@ -16,6 +16,10 @@ def _utc_now_iso() -> str:
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+
+    # Enforce foreign-key relationships between authentication tables.
+    conn.execute("PRAGMA foreign_keys = ON")
+
     return conn
 
 
@@ -103,12 +107,326 @@ def init_db() -> None:
                     value_json TEXT NOT NULL,
                     updated_utc TEXT NOT NULL
                 );
+
+                                CREATE TABLE IF NOT EXISTS ai_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    report_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    created_utc TEXT NOT NULL,
+                    range_minutes INTEGER NOT NULL,
+                    data_mode TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    node_ids_json TEXT NOT NULL DEFAULT '[]',
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    report_text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'completed'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_ai_reports_created
+                    ON ai_reports (created_utc DESC);
+
+        
+                
+-- ==========================================
+-- Authentication: Registered dashboard users
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS auth_users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+
+    role TEXT NOT NULL DEFAULT 'viewer'
+        CHECK (role IN ('super_admin', 'admin', 'viewer')),
+
+    is_active INTEGER NOT NULL DEFAULT 1,
+    email_verified_utc TEXT,
+    created_utc TEXT NOT NULL,
+    updated_utc TEXT NOT NULL,
+    last_login_utc TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_users_email
+    ON auth_users (email);
+
+
+-- ==========================================
+-- Authentication: One-time passwords
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS auth_otps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    otp_hash TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'login',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    created_utc TEXT NOT NULL,
+    expires_utc TEXT NOT NULL,
+    consumed_utc TEXT,
+    invalidated_utc TEXT,
+
+    FOREIGN KEY (user_id)
+        REFERENCES auth_users(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_otps_user
+    ON auth_otps (user_id, created_utc DESC);
+
+
+-- ==========================================
+-- Authentication: Server-managed sessions
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    session_token_hash TEXT NOT NULL UNIQUE,
+    created_utc TEXT NOT NULL,
+    expires_utc TEXT NOT NULL,
+    last_seen_utc TEXT,
+    revoked_utc TEXT,
+
+    FOREIGN KEY (user_id)
+        REFERENCES auth_users(id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
+    ON auth_sessions (user_id);
+
+
+-- ==========================================
+-- Authentication: Invitation-only registration
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS auth_invitations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL COLLATE NOCASE,
+    token_hash TEXT NOT NULL UNIQUE,
+
+    role TEXT NOT NULL DEFAULT 'viewer'
+        CHECK (role IN ('admin', 'viewer')),
+
+    invited_by INTEGER,
+    created_utc TEXT NOT NULL,
+    expires_utc TEXT NOT NULL,
+    accepted_utc TEXT,
+    revoked_utc TEXT,
+
+    FOREIGN KEY (invited_by)
+        REFERENCES auth_users(id)
+        ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_invitations_email
+    ON auth_invitations (email);
+
+
+-- ==========================================
+-- Authentication: Audit log
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS auth_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER,
+    event_type TEXT NOT NULL,
+    target_email TEXT,
+    details_json TEXT,
+    created_utc TEXT NOT NULL,
+
+    FOREIGN KEY (actor_user_id)
+        REFERENCES auth_users(id)
+        ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_audit_created
+    ON auth_audit_log (created_utc DESC);
+
                 """
             )
+
+            # Safe migration: add full_name to existing authentication databases.
+            user_columns = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(auth_users)"
+                ).fetchall()
+            }
+
+            if "full_name" not in user_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE auth_users
+                    ADD COLUMN full_name TEXT NOT NULL DEFAULT ''
+                    """
+                )
+
             conn.commit()
         finally:
             conn.close()
 
+# ---------------------------------------------------------------------------
+# AI-Generated Report Storage
+# ---------------------------------------------------------------------------
+
+def save_ai_report(
+    report_type: str,
+    title: str,
+    range_minutes: int,
+    data_mode: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    node_ids: List[str],
+    evidence: Dict[str, Any],
+    report_text: str,
+    status: str = "completed",
+) -> int:
+    created_utc = _utc_now_iso()
+
+    with _db_lock:
+        conn = get_conn()
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO ai_reports (
+                    report_type,
+                    title,
+                    created_utc,
+                    range_minutes,
+                    data_mode,
+                    provider,
+                    model,
+                    prompt_version,
+                    node_ids_json,
+                    evidence_json,
+                    report_text,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report_type,
+                    title,
+                    created_utc,
+                    range_minutes,
+                    data_mode,
+                    provider,
+                    model,
+                    prompt_version,
+                    json.dumps(node_ids),
+                    json.dumps(evidence),
+                    report_text,
+                    status,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+        finally:
+            conn.close()
+
+
+def get_ai_report(report_id: int) -> Optional[Dict[str, Any]]:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM ai_reports WHERE id = ?",
+                (report_id,),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            result = dict(row)
+            result["node_ids"] = json.loads(result.pop("node_ids_json"))
+            result["evidence"] = json.loads(result.pop("evidence_json"))
+
+            return result
+        finally:
+            conn.close()
+
+
+def list_ai_reports(limit: int = 50) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 200))
+
+    with _db_lock:
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    report_type,
+                    title,
+                    created_utc,
+                    range_minutes,
+                    data_mode,
+                    provider,
+                    model,
+                    prompt_version,
+                    node_ids_json,
+                    status
+                FROM ai_reports
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+            results = []
+
+            for row in rows:
+                item = dict(row)
+                item["node_ids"] = json.loads(item.pop("node_ids_json"))
+                results.append(item)
+
+            return results
+        finally:
+            conn.close()
+
+def update_ai_report(
+    report_id: int,
+    status: str,
+    report_text: Optional[str] = None,
+) -> bool:
+    """
+    Update the status and optionally the generated text
+    of an existing AI report.
+    """
+
+    allowed_statuses = {
+        "pending",
+        "generating",
+        "completed",
+        "failed",
+    }
+
+    if status not in allowed_statuses:
+        raise ValueError("Invalid AI report status.")
+
+    with _db_lock:
+        conn = get_conn()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE ai_reports
+                SET status = ?,
+                    report_text = COALESCE(?, report_text)
+                WHERE id = ?
+                """,
+                (status, report_text, report_id),
+            )
+
+            conn.commit()
+            return cursor.rowcount > 0
+
+        finally:
+            conn.close()
 
 # ---------------------------------------------------------------------------
 # Persistent Application Settings

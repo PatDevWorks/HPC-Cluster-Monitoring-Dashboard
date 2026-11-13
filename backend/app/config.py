@@ -1,4 +1,21 @@
 import os
+AUTH_SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "").strip()
+
+AUTH_SESSION_HOURS = int(os.getenv("AUTH_SESSION_HOURS", "12"))
+
+AUTH_COOKIE_NAME = os.getenv(
+    "AUTH_COOKIE_NAME",
+    "spu_aiops_session"
+).strip()
+
+AUTH_COOKIE_SECURE = (
+    os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
+)
+
+FRONTEND_BASE_URL = os.getenv(
+    "FRONTEND_BASE_URL",
+    "http://localhost:5173"
+).rstrip("/")
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -14,11 +31,14 @@ SCC_DATASET_DIR = Path(
     )
 )
 
+
 # Infrastructure Endpoints (configurable at runtime via Settings API & persisted in SQLite)
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
 ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
-
+# Gemini AI reporting configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 # Backend-only SSH configuration for remote Slurm & Node Log retrieval.
 # Credentials/key paths are NEVER exposed to the frontend API responses.
 HPC_SSH_HOST = os.getenv("HPC_SSH_HOST", "").strip()

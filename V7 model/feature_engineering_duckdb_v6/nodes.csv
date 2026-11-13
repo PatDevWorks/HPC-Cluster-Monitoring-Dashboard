@@ -1,0 +1,4 @@
+node_id,cpu_model,cpu_logical_cores,memory_total_bytes,root_disk_bytes,network_interface,ip_address,virtualization,operating_system
+compute001,AMD EPYC-Rome Processor,8,16794083328,150000000000,enp3s0,10.100.0.198,KVM,Ubuntu 22.04.5 LTS
+compute002,AMD EPYC-Rome Processor,8,16794083328,150000000000,enp3s0,10.100.0.167,KVM,Ubuntu 22.04.5 LTS
+compute003,AMD EPYC-Rome Processor,8,16794083328,150000000000,enp3s0,10.100.0.66,KVM,Ubuntu 22.04.5 LTS

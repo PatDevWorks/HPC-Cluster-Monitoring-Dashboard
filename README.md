@@ -1,299 +1,536 @@
-# Sol Plaatje A Dev Cluster Dashboard
 
-## 📖 Overview
+# Sol Plaatje A HPC AIOps Dashboard
 
-The **Sol Plaatje A Dev Cluster Dashboard** is a modern, real‑time monitoring and AI‑ops platform for a four‑node HPC cluster (1 head node + 3 compute nodes). It:
+**HPC Predictive Monitoring and AIOps Platform**
 
-* **Shows live Prometheus metrics** (CPU, memory, disk I/O, network, load, temperature, etc.)
-* **Runs a rolling‑feature pipeline** that creates temporal statistics (means, std‑devs, slopes, peer‑differences) on‑the‑fly.
-* **Scores each node** with unsupervised anomaly detectors (Isolation Forest, One‑Class SVM, LOF, K‑Means) and an optional supervised failure‑prediction model (`.pkl`).
-* **Generates alerts** (P1/P2/P3) through a state‑machine that respects persistence rules and a 30 min webhook cooldown.
-* **Provides a clean React UI** with 10 navigation tabs (Overview, Topology, Live Monitoring, AI & Predictions, Job Management, Node Logs, Node Terminal, Alerts & Incidents, Performance Analytics, Settings).
-* **Allows the ML engine to be toggled on/off** via the Settings page (or API).
-* **Uses a tiny SQLite DB** for UI‑level state (model enable flag, alert episodes, system logs) while heavy telemetry lives in Prometheus and historic data is stored in DuckDB.
+A monitoring and operational support platform developed for the Sol Plaatje University HPC development cluster. The application brings together cluster telemetry, node health monitoring, workload visibility, diagnostics, alert management, analytics, and machine-learning-assisted anomaly detection.
 
-The whole project lives under:
+---
+
+## 1. Project Overview
+
+The Sol Plaatje A HPC AIOps Dashboard provides a central interface for observing and analysing the operational state of an HPC cluster.
+
+It integrates with Prometheus-based monitoring services, processes incoming node metrics, maintains rolling feature information, evaluates node behaviour, and distributes monitoring updates to connected dashboard clients.
+
+The current development environment is designed around a four-node HPC cluster:
+
+- One head node.
+- Three compute nodes.
+
+The platform is intended to support HPC administrators and authorised team members by providing infrastructure visibility, diagnostic information, workload context, and operational decision support.
+
+## 2. Key Features
+
+| Area | Description |
+|---|---|
+| Cluster Overview | Displays cluster health and operational indicators. |
+| Cluster Topology | Provides a visual representation of configured cluster nodes. |
+| Live Monitoring | Displays incoming telemetry and historical monitoring information. |
+| AI and Predictive Monitoring | Presents anomaly and failure-related scores from the configured ML engine. |
+| Job Management | Provides Slurm workload and job-management functionality. |
+| Node Diagnostics | Retrieves node logs and diagnostic information. |
+| Instance Terminal | Provides an authenticated, restricted terminal interface. |
+| Alerts and Incidents | Supports alert episode management and operational actions. |
+| Performance Analytics | Provides historical performance analysis. |
+| Reports | Supports report previews and data exports. |
+| Settings | Allows authorised administrators to configure supported services and monitoring settings. |
+| Authentication | Provides session-based authentication and role-based access control. |
+
+Some capabilities depend on external services, cluster connectivity, user permissions, and available model artefacts.
+
+## 3. Technology Stack
+
+### Frontend
+
+- React 18
+- Vite 6
+- Tailwind CSS 4
+- Recharts
+- Lucide React
+
+### Backend
+
+- Python
+- FastAPI
+- Uvicorn
+- Pydantic
+- SQLite
+- Prometheus Client
+- Requests
+- NumPy
+- Pandas
+- Scikit-learn
+- Joblib
+
+### Infrastructure and Monitoring
+
+- Prometheus
+- Prometheus Node Exporter
+- Slurm Workload Manager
+- SSH
+- Linux systemd
+
+### Technology Rationale
+
+**React and Vite**
+
+React provides a component-based interface for the dashboard, while Vite supports rapid development and production builds.
+
+**FastAPI**
+
+FastAPI provides REST API and WebSocket functionality while allowing the backend to use Python's data-processing and machine-learning ecosystem.
+
+**Prometheus**
+
+Prometheus provides metrics collection and querying capabilities. Node Exporter exposes operating-system metrics from the HPC nodes.
+
+**SQLite**
+
+SQLite provides lightweight persistent storage for application settings, telemetry history, alert episodes, audit records, and authentication data. It complements Prometheus rather than replacing it as the primary metrics collection system.
+
+**WebSockets**
+
+WebSockets allow the backend to distribute live monitoring updates to connected frontend clients.
+
+**Slurm**
+
+Slurm integration provides workload and scheduler context relevant to HPC operations.
+
+## 4. System Architecture
+
+The application follows a telemetry-processing and monitoring workflow.
+
+### Data Flow
+
+1. Prometheus collects metrics exposed by the cluster nodes.
+2. The backend retrieves telemetry through the cluster connector.
+3. The feature pipeline maintains rolling node-level and cluster-level information.
+4. The machine-learning engine evaluates node observations.
+5. The alert engine evaluates operational conditions and prediction outputs.
+6. Relevant application information is persisted in SQLite.
+7. The orchestrator broadcasts updated cluster snapshots through WebSockets.
+8. The React frontend displays monitoring, diagnostics, and analytical information.
+
+### High-Level Architecture
+
+```mermaid
+flowchart TD
+    A[HPC Cluster Nodes] --> B[Prometheus Node Exporter]
+    B --> C[Prometheus Server]
+    C --> D[FastAPI Backend]
+    D --> E[Cluster Telemetry Connector]
+    E --> F[Rolling Feature Pipeline]
+    F --> G[Machine Learning Engine]
+    F --> H[Alert Engine]
+    G --> H
+    D --> I[SQLite Database]
+    D --> J[WebSocket Updates]
+    J --> K[React Dashboard]
 ```
-C:\Users\Admin\OneDrive - Sol Plaatje University\Documents\MODULES\2ND YEAR\HPC\NRC\Capstone\hpc-aiops-dashboard
-``` 
 
----
+For further details, see [Architecture Documentation](docs/ARCHITECTURE.md).
 
-## 📂 Repository layout
+## 5. Repository Structure
 
-| Path | Description |
-|------|-------------|
-| `frontend/` | React + Vite UI source code. |
-| `frontend/src/pages/` | One component per navigation tab (`OverviewPage.jsx`, `TopologyPage.jsx`, …). |
-| `frontend/src/components/` | Shared UI widgets (`HeaderBar.jsx`, `ThemeContext.jsx`, `ModelToggleCard.jsx`). |
-| `frontend/public/` | Static assets (logo images, favicons). |
-| `backend/` | FastAPI backend (Python). |
-| `backend/app/` | Core modules:
-|  `main.py` | FastAPI entry point, registers routers and background tasks. |
-|  `config.py` | Global constants, PromQL queries, alert policy, collector thresholds. |
-|  `prometheus_service.py` | Pulls the instant metrics from Prometheus. |
-|  `feature_pipeline.py` | `RollingFeaturePipeline` – per‑node ring buffers and engineered features. |
-|  `ml_engine.py` | Loads `.pkl` artefacts, runs unsupervised + supervised scoring, returns a rich prediction dict. |
-|  `alert_engine.py` | `SmartAlertEngine` – persistence counters, alert‑episode DB writes, webhook dispatch. |
-|  `database.py` | Thin SQLite wrapper (`app.db`). Creates tables for alerts, system logs, app settings, and the ML‑engine flag. |
-|  `ssh_bridge.py`, `slurm_service.py` | SSH helpers for node diagnostics, job management, and terminal access. |
-| `backend/models/` | **Hot‑swap model directory** – drop any of the artefacts listed in `README_DROP_MODELS_HERE.md` and the backend will pick them up automatically. |
-| `backend/models/README_DROP_MODELS_HERE.md` | Instructions for teammates on what files to copy. |
-| `backend/.venv/` | Virtual‑env (created locally for development). |
-| `hpc_aiops_dashboard/` | (optional) generated `dist/` folder after `npm run build`. |
-| `data/` | DuckDB historical DB (`hpc_exploration.duckdb`) and optional feature‑engineering parquet checkpoints. |
-| `HPC_Feature_Engineering_DuckDB_v6.ipynb` | Jupyter notebook that reproduces the exact same feature pipeline on historic data for model training and validation. |
-| `Dockerfile` (not shipped yet) | Template for containerising the backend + UI. |
-
----
-
-## 🛠️ How the dashboard was built – step by step
-
-### 1️⃣  Project scaffolding
-1. Created the repo folder `hpc-aiops-dashboard`.
-2. Ran `npm create vite@latest frontend --template react` → generated a React + Vite app.
-3. Created a Python virtual‑env under `backend/.venv` and installed:
-   ```bash
-   pip install fastapi uvicorn[standard] duckdb pandas numpy pyarrow matplotlib tzdata
-   ```
-4. Added a **FastAPI** entry point (`backend/app/main.py`) and wired it to the Vite dev server via CORS.
-
-### 2️⃣  Prometheus integration
-* Defined the 10 **core metric PromQL expressions** in `backend/app/config.py` (`INSTANT_PROMQL_QUERIES`).
-* Implemented `PrometheusService.fetch_prometheus_cluster_snapshot` to query Prometheus in one HTTP request per metric and return a list of dictionaries (`node_id`, `metric`, `value`, `timestamp`).
-* Added health‑check endpoint (`/api/prometheus/health`).
-
-### 3️⃣  Rolling feature pipeline
-* Built `RollingFeaturePipeline` (file `feature_pipeline.py`).
-  * Holds a `deque(maxlen=72)` per node → ~15 min of 15‑second samples.
-  * On each scrape it:
-    1. Appends the raw row.
-    2. Computes rolling **mean12**, **std12**, **slope12**, **z‑score**, **peer‑diff** for every tracked metric (`cpu_utilization_percent`, `cpu_iowait_percent`, …).
-    3. Adds **HPC context**: `normalized_load1`, `cluster_busy_mpi`, `mpi_straggler_score`.
-* The enriched dict is handed to the ML engine.
-
-### 4️⃣  Model hot‑swap design
-* `backend/models/README_DROP_MODELS_HERE.md` enumerates the artefacts a teammate must provide (scaler, four unsupervised detectors, optional supervised XGBoost/RandomForest model, column‑order JSON, optional `model_metrics.json`).
-* `ModelEngine.__init__` calls `reload_models()` which:
-  * Scans the directory, loads any `.pkl` with `joblib.load`.
-  * Reads `rf_feature_columns.json` if a supervised model exists.
-* The **engine can be disabled** via a SQLite flag (`ml_engine_settings.enabled`). The UI toggles it with `POST /api/model/enabled`.
-
-### 5️⃣  Scoring pipeline (`ModelEngine.score_node`)
-1. **Gate 0** – checks maintenance flag & exporter availability (`up`). Returns early for maintenance or node‑down.
-2. **Stage 1** – runs the four unsupervised detectors (scaled base features) and applies the **MPI guard** (suppresses false positives during heavy MPI jobs). Produces `anomaly_score` and `consensus_count`.
-3. **Stage 2** – if a supervised model is present, calls `predict_proba`; otherwise falls back to a calibrated logistic baseline.
-4. **Stage 3** – computes feature attributions (model importances or deviation‑based) and classifies the fault (`memory_exhaustion`, `thermal_shutdown`, …) using `PLAYBOOKS`.
-5. **Stage 4** – deterministic node health score (0‑100) and returns a rich dict used by the UI and alert engine.
-
-### 6️⃣  Alert engine (`SmartAlertEngine`)
-* Reads `ALERT_POLICY` from `config.py` (or overrides from SQLite `app_settings`).
-* Maintains per‑node streak counters (`p1`, `p2`, `p3`).
-* When a priority threshold is met **and** the required consecutive ticks have passed, it:
-  * Inserts/updates a row in `alert_episode` (SQLite). 
-  * Writes a line to `system_log`.
-  * Sends a webhook (if `ALERT_WEBHOOK_URL` is set) respecting a 30 min per‑node cooldown.
-* Auto‑resolves after three healthy ticks.
-
-### 7️⃣  Front‑end wiring
-* Each page fetches its data via a dedicated endpoint:
-  * `/api/raw_metrics` (WebSocket) → Live Monitoring charts.
-  * `/api/ml/status` → AI & Predictions KPI cards, top‑feature list, model‑enabled flag.
-  * `/api/alerts` → Alerts & Incidents table.
-  * `/api/model/enabled` (GET/POST) → Settings page toggle.
-* UI uses **TailwindCSS** (optional) and **Recharts** for graphs.
-* Added a **ThemeContext** + dark‑mode‑aware SPU logo (`SpuLogo.jsx`).
-* Implemented a **ModelToggleCard** component (see `frontend/src/components/ModelToggleCard.jsx`).
-
-### 8️⃣  Historical feature‑engineering notebook
-* `HPC_Feature_Engineering_DuckDB_v6.ipynb` reads the historic DuckDB (`hpc_exploration.duckdb`).
-* Re‑creates the exact same rolling pipeline (delta handling, negative‑reset detection, collector‑presence baseline) to produce:
-  * `feat_15s.parquet` – 15‑second per‑node feature table (used for model training).
-  * `feat_1m.parquet` – 1‑minute aggregated table.
-  * Collector health reports, benchmark‑event alignment tables.
-* The notebook is **read‑only**; it never writes back to the live dashboard DB.
-
-### 9️⃣  SQLite usage (see README section **SQLite** below)
-* Stores UI‑level mutable state: model flag, alert episodes, system logs, app settings.
-* Small, fast, zero‑config – perfect for a container‑native service.
-
-### 🔟  Deployment scaffolding (Dockerfile template)
-A minimal `Dockerfile` (not yet built into the repo) would:
-```dockerfile
-FROM python:3.12-slim AS backend
-WORKDIR /app
-COPY backend/ ./backend/
-RUN pip install --no-cache-dir -r backend/requirements.txt
-EXPOSE 8000
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
-FROM node:20-alpine AS frontend
-WORKDIR /frontend
-COPY frontend/ ./
-RUN npm install && npm run build
-EXPOSE 5173
-CMD ["npx", "serve", "-s", "dist", "-l", "5173"]
+```text
+hpc-aiops-dashboard/
+│
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── config.py
+│   │   ├── database.py
+│   │   ├── cluster_connector.py
+│   │   ├── prometheus_service.py
+│   │   ├── feature_pipeline.py
+│   │   ├── ml_engine.py
+│   │   ├── ml_engine_v6.py
+│   │   ├── alert_engine.py
+│   │   ├── auth_service.py
+│   │   ├── auth_security.py
+│   │   ├── auth_dependencies.py
+│   │   ├── slurm_service.py
+│   │   ├── ssh_bridge.py
+│   │   ├── terminal_service.py
+│   │   ├── logs_diagnostics.py
+│   │   └── reports_service.py
+│   │
+│   ├── requirements.txt
+│   ├── create_admin.py
+│   └── test_*.py
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── context/
+│   │   ├── pages/
+│   │   ├── App.jsx
+│   │   ├── api.js
+│   │   └── main.jsx
+│   │
+│   └── package.json
+│
+├── grafana/
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── INSTALLATION.md
+│   ├── AUTHENTICATION.md
+│   ├── MACHINE_LEARNING.md
+│   ├── DEPLOYMENT.md
+│   ├── API_REFERENCE.md
+│   ├── CONTRIBUTING.md
+│   └── OPERATIONS.md
+│
+├── deploy-headnode.sh
+├── start-dashboard.ps1
+└── README.md
 ```
-* In production you would run the two stages in separate containers behind a reverse‑proxy (NGINX) or combine them with a multi‑stage build.
 
----
+The structure above highlights the main project components. Additional files and directories may exist as the project evolves.
 
-## 📦 Prerequisites
+The SQLite database is generated and maintained by the application and should not be committed if it contains user information, session records, or other sensitive data.
 
-| Tool | Minimum version | Why needed |
-|------|----------------|------------|
-| **Node.js** | 20.x | Build and run the React UI (`npm install`, `npm run dev`). |
-| **Python** | 3.12 | FastAPI backend, DuckDB, Pandas, NumPy, joblib. |
-| **Docker** (optional) | 24.x | Containerised deployment. |
-| **Prometheus** | any | Must be scraping the node exporters in the cluster. |
-| **DuckDB** (CLI or via Python) | 2.0 | Historical data for model training. |
+## 6. Monitoring and Data Sources
 
----
+The dashboard supports multiple monitoring modes through the cluster telemetry connector.
 
-## 🚀 Getting started (local development)
+### Live Prometheus Monitoring
 
-1. **Clone the repo** (or open the existing folder). 
-2. **Backend**
-   ```bash
-   cd backend
-   python -m venv .venv
-   .venv\Scripts\activate   # PowerShell
-   pip install -r requirements.txt   # (or install the packages listed in the code)
-   # Initialise the SQLite DB (runs automatically on first start)
-   python -c "import backend.app.database as db; db.init_app_db()"
-   uvicorn backend.app.main:app --reload   # runs on http://localhost:8000
-   ```
-3. **Frontend**
-   ```bash
-   cd ../frontend
-   npm install
-   npm run dev   # Vite dev server on http://localhost:5173
-   ```
-4. **Open the dashboard** – navigate to `http://localhost:5173`. The UI talks to the backend at `http://localhost:8000` (CORS is pre‑configured).
-5. **Verify Prometheus connectivity** – edit `backend/app/config.py` if your Prometheus host/port differ, then visit `http://localhost:8000/api/prometheus/health`.
+In live mode, the backend retrieves actual metrics from the configured Prometheus server.
 
----
+Depending on exporter availability, monitored measurements include:
 
-## 📊 Adding / Updating a model (Team‑member workflow)
+- CPU utilisation.
+- CPU I/O wait.
+- Memory availability and utilisation.
+- Swap usage.
+- System load averages.
+- Disk read and write activity.
+- Filesystem utilisation.
+- Network traffic.
+- Network errors and drops.
+- Process information.
+- Context switches.
+- Pressure-stall information.
+- Hardware sensor measurements where available.
 
-1. Export the following artefacts from the training notebook (`Modelling_Predictive_HPC_Cleaned.ipynb`):
-   * `hpc_feature_scaler.pkl`
-   * `isolation_forest_hpc.pkl`
-   * `one_class_svm_hpc.pkl`
-   * `lof_hpc.pkl`
-   * `kmeans_hpc.pkl`
-   * `kmeans_threshold.pkl`
-   * **Either** `final_rf_failure_model.pkl` **or** `final_xgb_failure_model.pkl`
-   * `rf_feature_columns.json` (ordered list of column names – must match the enriched feature dict)
-   * *(optional)* `model_metrics.json` (precision/recall/F1 for UI display)
-2. Copy **all** files into the backend model directory:
-   ```bash
-   cp *.pkl *.json "../backend/models/"
-   ```
-3. **Reload the models** from the UI (AI & Predictions → **Reload .pkl Models**) *or* simply restart the backend service.
-4. The dashboard will now show `engine_mode: production_pkl_full` and start using the new model for live scoring.
+Live telemetry availability depends on the monitoring configuration and the metrics exposed by the cluster.
 
-### Disabling the model temporarily
-* **Via UI:** Open **Settings** → **ML Engine** toggle.
-* **Via API:**
-  ```bash
-  curl -X POST http://localhost:8000/api/model/enabled -H "Content-Type: application/json" -d '{"enabled": false}'
-  ```
-* When disabled, `ModelEngine.score_node` returns a neutral payload (all risks = 0, `prediction_source: engine_disabled`). Alerts will not fire.
+When Prometheus is unavailable, the connector must represent the telemetry as unavailable rather than fabricating live measurements.
 
----
+### Simulation Mode
 
-## 🗄️ SQLite – what it stores and why
+Simulation mode generates synthetic monitoring observations for interface development and controlled testing.
 
-* `ml_engine_settings` – single row (`enabled` = 0/1) controlling the global ML toggle.
-* `alert_episode` – open/closed incidents, priority, fault class, timestamps, playbook command, alert points, and last webhook time.
-* `system_log` – chronological audit trail (webhook dispatches, playbook runs, auto‑resolves).
-* `app_settings` – JSON key/value store for overridable configs (e.g., custom `ALERT_POLICY`).
+### Dataset Replay Mode
 
-The file lives at `backend/app/app.db`. You can inspect it with the SQLite CLI:
+Dataset replay mode processes historical or prepared observations for testing and analysis.
+
+Synthetic and replayed observations must be distinguished from genuine live cluster measurements when evaluating model behaviour.
+
+## 7. Machine Learning and Predictive Monitoring
+
+The dashboard incorporates a machine-learning pipeline intended to support anomaly detection and predictive HPC monitoring.
+
+### Feature Engineering
+
+The rolling feature pipeline maintains recent observations and generates derived information, including:
+
+- Rolling means.
+- Rolling standard deviations.
+- Metric slopes.
+- Peer-node comparisons.
+- Normalised load.
+- Rolling z-scores.
+- Node-level deviations.
+- MPI straggler-related indicators.
+
+### Existing Model Components
+
+The current model engine supports loading available model artefacts, including:
+
+- Isolation Forest.
+- One-Class SVM.
+- Local Outlier Factor.
+- K-Means.
+- Random Forest failure model.
+- XGBoost failure model.
+
+The actual execution path depends on the availability of the required artefacts and configuration.
+
+Where trained artefacts are unavailable, the engine can use statistical or heuristic fallback behaviour. Such fallback outputs must not be interpreted as predictions from a fully trained model.
+
+### External V6 Model Integration
+
+The backend also contains an external V6 model API client.
+
+This client supports observation submission, node status retrieval, model information, and history warm-up.
+
+The V6 integration is an inference client, not a complete real-time model training system.
+
+The longer-term development objective is to establish a validated real-time data collection, training, evaluation, model versioning, and deployment workflow.
+
+For further details, see [Machine Learning Documentation](docs/MACHINE_LEARNING.md).
+
+## 8. Authentication and Security
+
+The application implements session-based authentication and role-based access control.
+
+Current roles:
+
+| Role | Description |
+|---|---|
+| `member` | Standard authorised dashboard user. |
+| `senior_admin` | User with elevated administrative permissions. |
+
+Security mechanisms include:
+
+- Password hashing using PBKDF2-HMAC-SHA256.
+- Secure random session token generation.
+- Hashed session token storage.
+- Session expiry and revocation.
+- CSRF protection.
+- Trusted-origin validation.
+- Authenticated WebSocket connections.
+- Backend permission enforcement.
+
+Sensitive operations, including selected Slurm actions, terminal execution, and settings management, are restricted to senior administrators.
+
+Invitation-based registration and configurable email-domain approval should not be considered operational until their complete workflows have been implemented and verified.
+
+See [Authentication Documentation](docs/AUTHENTICATION.md).
+
+## 9. Installation and Local Development
+
+### Prerequisites
+
+- Python 3.10 or later.
+- Node.js and npm.
+- Git.
+- Access to a Prometheus server for live monitoring.
+- Access to an HPC environment for cluster integration.
+
+### Clone the Repository
+
 ```bash
-sqlite3 backend/app/app.db "SELECT * FROM alert_episode;"
+git clone <YOUR_GITHUB_REPOSITORY_URL>
+cd hpc-aiops-dashboard
 ```
 
+Replace the placeholder with the actual repository URL.
+
+### Backend Setup
+
+```bash
+cd backend
+
+python -m venv .venv
+```
+
+Activate the environment on Windows:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start the backend:
+
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Frontend Setup
+
+Open another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Access the Application
+
+Frontend:
+
+`http://localhost:5173`
+
+Backend:
+
+`http://localhost:8000`
+
+For complete setup instructions, see [Installation Documentation](docs/INSTALLATION.md).
+
+## 10. Deployment
+
+The repository includes deployment support for local development and Linux head-node environments.
+
+### Windows Development
+
+The `start-dashboard.ps1` script automates local startup of the frontend and backend.
+
+### Linux Head-Node Deployment
+
+The `deploy-headnode.sh` script provides a baseline Linux deployment process, including:
+
+- Frontend production build.
+- Python virtual environment setup.
+- Backend dependency installation.
+- systemd service configuration.
+- Automatic service startup.
+
+A hardened production environment additionally requires appropriate HTTPS, reverse-proxy, firewall, secrets-management, backup, and access-control configuration.
+
+See [Deployment Documentation](docs/DEPLOYMENT.md).
+
+## 11. API and Integration
+
+The backend exposes REST endpoints and an authenticated WebSocket interface.
+
+Main API areas include:
+
+- Authentication.
+- Monitoring state.
+- Model status.
+- Slurm operations.
+- Node diagnostics.
+- Terminal operations.
+- Analytics.
+- Reports.
+- Fault injection.
+- Alert management.
+- Application settings.
+
+The live monitoring WebSocket endpoint is:
+
+`/ws/live`
+
+For the available endpoint inventory, see [API Reference](docs/API_REFERENCE.md).
+
+## 12. Database and Persistence
+
+The application uses SQLite to persist selected application information.
+
+Database tables include:
+
+- `alert_episodes`
+- `slurm_actions_audit`
+- `system_logs`
+- `telemetry_history`
+- `app_settings`
+- `users`
+- `sessions`
+- `auth_events`
+- `invitations`
+- `ml_engine_settings`
+
+Prometheus remains responsible for infrastructure metrics collection and querying.
+
+Database retention and backup policies should be reviewed as the monitoring environment grows.
+
+## 13. Testing and Development
+
+Backend tests cover areas including:
+
+- Authentication flows.
+- Authentication services.
+- CSRF protection.
+- Member permissions.
+- Role permissions.
+- WebSocket authentication.
+
+Run relevant backend tests using the configured Python environment:
+
+```bash
+python -m pytest backend/
+```
+
+For frontend build verification:
+
+```bash
+cd frontend
+npm run build
+```
+
+Refer to [Contributing Documentation](docs/CONTRIBUTING.md) for development practices and testing guidance.
+
+## 14. Project Documentation
+
+The complete project documentation is available in the `docs/` directory.
+
+| Document | Description |
+|---|---|
+| [Architecture](docs/ARCHITECTURE.md) | System architecture, components, and telemetry flow. |
+| [Installation](docs/INSTALLATION.md) | Development environment setup and installation instructions. |
+| [Authentication](docs/AUTHENTICATION.md) | Authentication, sessions, security, and role-based access. |
+| [Machine Learning](docs/MACHINE_LEARNING.md) | Machine-learning architecture, feature engineering, and predictive monitoring. |
+| [Deployment](docs/DEPLOYMENT.md) | Local and Linux head-node deployment instructions. |
+| [API Reference](docs/API_REFERENCE.md) | Backend API endpoints and WebSocket interface. |
+| [Contributing](docs/CONTRIBUTING.md) | Development workflow, testing, and contribution guidelines. |
+| [Operations](docs/OPERATIONS.md) | Troubleshooting, maintenance, and operational procedures. |
+
+## 15. Current Development Status
+
+The project currently brings together:
+
+- React-based monitoring dashboard.
+- FastAPI backend.
+- Prometheus telemetry integration.
+- Rolling feature engineering.
+- Machine-learning model integration.
+- Alert processing.
+- SQLite persistence.
+- Authentication and role-based permissions.
+- Slurm and diagnostic integrations.
+- Linux deployment support.
+
+Further development is focused on improving the predictive monitoring pipeline, establishing a reliable real-time training and evaluation workflow, strengthening operational capabilities, and improving deployment readiness.
+
+Features that depend on external infrastructure, model artefacts, or incomplete integration workflows should be evaluated in their actual deployment environment before being considered production-ready.
+
+## 16. Security Considerations
+
+Before deploying the application in a shared or production HPC environment:
+
+- Use HTTPS.
+- Enable secure session cookies.
+- Restrict trusted origins.
+- Protect administrator accounts.
+- Keep API keys and SSH credentials outside source control.
+- Restrict administrative endpoints.
+- Apply appropriate firewall rules.
+- Back up the SQLite database.
+- Review audit records.
+- Validate all operational actions.
+
+The dashboard is an operational support tool and does not replace established HPC administration, security, or incident-response procedures.
+
+## 17. Project Context
+
+**Project:** Sol Plaatje A HPC AIOps Dashboard
+
+**Institution:** Sol Plaatje University
+
+**Environment:** HPC Development Cluster
+
+**Focus Areas:**
+
+- High-Performance Computing.
+- Infrastructure Monitoring.
+- Predictive Analytics.
+- Machine Learning.
+- Anomaly Detection.
+- Cluster Operations.
+- AIOps.
+
 ---
 
-## 🛡️ Security & Permissions
-
-* **No secrets** are stored in the repo. The webhook URL (`ALERT_WEBHOOK_URL`) and any SSH keys are injected via environment variables at deployment time.
-* The backend **does not expose** raw SSH commands; `ssh_bridge.py` only runs a white‑list of safe commands (see the `PLAYBOOKS` dictionary).
-* CORS is restricted to `http://localhost:5173` (dev) or the production domain you configure.
-
----
-
-## 📦 Production deployment checklist
-
-1. **Build the frontend**:
-   ```bash
-   cd frontend
-   npm run build   # creates ./dist
-   ```
-2. **Create a Docker image** (use the provided `Dockerfile` template or adapt to your CI). Ensure the built `dist/` folder is copied into the image or served via a separate Nginx container.
-3. **Mount a persistent volume** for:
-   * `backend/app/app.db` (SQLite state)
-   * `backend/models/` (drop‑in models – can be updated without rebuilding the image)
-   * `data/` (DuckDB historic DB, optional).
-4. **Set environment variables**:
-   * `PROMETHEUS_URL` – URL of the Prometheus instance.
-   * `ALERT_WEBHOOK_URL` – optional webhook endpoint.
-   * `EVENT_TIMEZONE_FOR_NAIVE` – usually `Africa/Johannesburg` unless you store UTC timestamps.
-5. **Run the container** (example with Docker Compose):
-   ```yaml
-   version: "3.9"
-   services:
-     api:
-       image: spau-backend:latest
-       ports: ["8000:8000"]
-       environment:
-         - PROMETHEUS_URL=http://prometheus:9090
-         - ALERT_WEBHOOK_URL=https://hooks.mycompany.com/aiops
-       volumes:
-         - ./backend/models:/app/models
-         - ./backend/app/app.db:/app/app.db
-   ```
-6. **Expose the UI** – serve the `dist/` folder with Nginx or a CDN and point it to the API host.
-7. **Verify** the health endpoint (`/api/prometheus/health`) and the `GET /api/model/enabled` flag.
-
----
-
-## 🧑‍💻 Development workflow tips
-
-* **Run the backend and frontend concurrently** (two terminals) for hot‑reloading.
-* **Use the Jupyter notebook** to explore new feature ideas on historic data; the notebook mirrors exactly what the live pipeline does, so any change you make there can be back‑ported to `feature_pipeline.py`.
-* **Add unit tests** under `backend/tests/` – the project ships a tiny smoke test (`scratch/smoke_test_backend.py`).
-* **Lint** with `flake8` and format with `black` to keep the codebase clean.
-* **When adding a new metric**:
-  1. Extend `INSTANT_PROMQL_QUERIES` in `config.py`.
-  2. Add the metric name to `RollingFeaturePipeline.TRACKED_METRICS`.
-  3. Update `UNSUPERVISED_BASE_FEATURES` if it should be part of the unsupervised scaler input.
-  4. Re‑train the model and drop the new artefacts into `backend/models/`.
-
----
-
-## 📚 Glossary
-
-| Term | Meaning |
-|------|---------|
-| **P1 / P2 / P3** | Alert priorities (Critical, Warning, Watch) defined in `SmartAlertEngine`. |
-| **MPI guard** | Logic that suppresses false‑positive CPU spikes when the whole cluster is busy on an MPI job. |
-| **Collector baseline** | 95 % presence rule that decides whether a Prometheus collector is considered healthy for that node. |
-| **RollingFeaturePipeline** | In‑memory per‑node ring buffer that produces temporal statistics used by the ML models. |
-| **ModelEngine** | Wrapper that loads hot‑swap `.pkl` artefacts and produces a `ModelResult` dictionary. |
-| **SmartAlertEngine** | State machine that decides when an alert should be opened, persisted, and optionally webhook‑ed. |
-| **SQLite `app.db`** | Small relational DB used for UI‑level mutable state; not for telemetry storage. |
-
----
-
-## 📞 Contact / Contributing
-
-* **Primary maintainer** – (your name / email).  
-* **Issue tracking** – open a GitHub issue in this repository.
-* **Pull requests** – follow the existing code style, run `ruff`/`black` locally, and ensure `npm run build` succeeds before merging.
-
----
-
-*Last updated: 2026‑11‑05*
+*Sol Plaatje A HPC AIOps Dashboard - Bringing intelligent monitoring and operational visibility to HPC infrastructure.*

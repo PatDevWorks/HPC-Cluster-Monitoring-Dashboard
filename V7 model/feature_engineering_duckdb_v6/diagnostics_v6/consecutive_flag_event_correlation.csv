@@ -1,0 +1,10 @@
+event_id,node_id,event_class,confirmed_flags_in_window,status,minimum_consecutive_minutes
+EVT002,compute001,service_failure,1,HIT,2
+EVT003,compute002,service_failure,2,HIT,2
+EVT004,compute003,monitoring_failure,2,HIT,2
+EVT002,compute001,service_failure,0,MISS,3
+EVT003,compute002,service_failure,1,HIT,3
+EVT004,compute003,monitoring_failure,1,HIT,3
+EVT002,compute001,service_failure,0,MISS,5
+EVT003,compute002,service_failure,0,MISS,5
+EVT004,compute003,monitoring_failure,0,MISS,5
