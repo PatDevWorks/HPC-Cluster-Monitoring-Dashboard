@@ -111,9 +111,7 @@ export default function NodeLogsPage({
             <h2 className="text-xl font-bold tracking-tight">
               Node Logs &amp; Diagnostics
             </h2>
-            <p className="text-xs spu-text-secondary">
-              Restricted SSH log inspection, keyword/severity filtering &amp; sanitized diagnostic bundles
-            </p>
+           
           </div>
         </div>
 

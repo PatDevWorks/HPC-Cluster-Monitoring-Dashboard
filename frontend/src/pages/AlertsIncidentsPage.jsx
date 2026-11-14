@@ -6,6 +6,7 @@ import {
   FileTerminal,
   ShieldOff,
   VolumeX,
+  Filter, Sparkles,
 } from 'lucide-react';
 
 export default function AlertsIncidentsPage({
@@ -14,10 +15,13 @@ export default function AlertsIncidentsPage({
   onInspectMonitoring,
   onInspectLogs,
   onRequestDrainNodeId,
+  onInvestigateIncident,
 }) {
   const [severityFilter, setSeverityFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('OPEN');
+  const [sourceFilter, setSourceFilter] = useState('ALL');
   const [selectedEpId, setSelectedEpId] = useState(null);
+  const [actionNote, setActionNote] = useState('');
 
   const episodes = snapshot?.alert_episodes || [];
 
@@ -35,9 +39,10 @@ export default function AlertsIncidentsPage({
       if (severityFilter !== 'ALL' && ep.priority !== severityFilter) return false;
       if (statusFilter === 'OPEN' && ep.status === 'resolved') return false;
       if (statusFilter === 'RESOLVED' && ep.status !== 'resolved') return false;
+      if (sourceFilter !== 'ALL' && (ep.alert_source || 'telemetry') !== sourceFilter) return false;
       return true;
     });
-  }, [episodes, severityFilter, statusFilter]);
+  }, [episodes, severityFilter, statusFilter, sourceFilter]);
 
   const selectedEpisode = useMemo(() => {
     return filtered.find((e) => e.id === selectedEpId) || filtered[0] || null;
@@ -53,9 +58,7 @@ export default function AlertsIncidentsPage({
           </div>
           <div>
             <h2 className="text-xl font-bold tracking-tight">Alerts &amp; Incidents</h2>
-            <p className="text-xs spu-text-secondary">
-              Persistence-gated AI early warnings, threshold violations &amp; incident triage
-            </p>
+            
           </div>
         </div>
 
@@ -101,6 +104,32 @@ export default function AlertsIncidentsPage({
         ))}
       </section>
 
+      {/* Detection Source Filter */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="spu-text-muted font-semibold inline-flex items-center gap-1">
+          <Filter className="h-3.5 w-3.5" /> Source:
+        </span>
+        {[
+          { id: 'ALL', label: 'All Sources' },
+          { id: 'telemetry', label: 'Telemetry Thresholds' },
+          { id: 'v7', label: 'V7 Isolation Forest' },
+          { id: 'lstm_v8', label: 'LSTM V8' },
+        ].map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => setSourceFilter(s.id)}
+            className={`rounded-lg px-2.5 py-1 font-semibold transition ${
+              sourceFilter === s.id
+                ? 'bg-cyan-500/20 text-[var(--accent-cyan)] border border-cyan-500/40'
+                : 'spu-subcard spu-text-secondary hover:text-[var(--text-primary)]'
+            }`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
       {/* Master-Detail Incident Layout */}
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         {/* Left: Incident Feed */}
@@ -109,9 +138,7 @@ export default function AlertsIncidentsPage({
             <div className="flex flex-col items-center justify-center py-14 text-center">
               <CheckCircle2 className="h-10 w-10 text-emerald-400 mb-2" />
               <div className="text-sm font-bold">No matching incidents</div>
-              <p className="mt-1 text-xs spu-text-secondary max-w-sm">
-                Cluster nodes are operating within configured thresholds and AI failure probabilities remain nominal.
-              </p>
+              
             </div>
           ) : (
             filtered.map((ep) => {
@@ -147,7 +174,9 @@ export default function AlertsIncidentsPage({
                   <p className="mt-1.5 text-xs spu-text-secondary">{ep.summary}</p>
 
                   <div className="mt-2 flex flex-wrap items-center justify-between text-[11px] spu-text-muted font-mono">
-                    <span>Node: {ep.node_id} • Class: {ep.fault_class}</span>
+                    <span>
+                      Node: {ep.node_id} • Source: {ep.alert_source || 'telemetry'} • Event: {ep.event_type || ep.fault_class}
+                    </span>
                     <span>Updated: {ep.last_seen_utc?.slice(0, 19).replace('T', ' ')}Z</span>
                   </div>
                 </div>
@@ -169,15 +198,15 @@ export default function AlertsIncidentsPage({
 
               <div className="grid grid-cols-3 gap-2 text-xs">
                 <div className="spu-subcard p-2.5">
-                  <span className="block text-[10px] spu-text-muted">Peak 1h Risk</span>
-                  <strong className="font-mono text-sm text-rose-400">
-                    {(selectedEpisode.max_failure_prob * 100).toFixed(1)}%
+                  <span className="block text-[10px] spu-text-muted">Source</span>
+                  <strong className="font-mono text-sm uppercase text-[var(--accent-cyan)]">
+                    {selectedEpisode.alert_source || 'telemetry'}
                   </strong>
                 </div>
                 <div className="spu-subcard p-2.5">
-                  <span className="block text-[10px] spu-text-muted">Detector Votes</span>
-                  <strong className="font-mono text-sm">
-                    {selectedEpisode.consensus_votes}/4
+                  <span className="block text-[10px] spu-text-muted">Severity</span>
+                  <strong className="font-mono text-sm uppercase">
+                    {selectedEpisode.severity || selectedEpisode.priority}
                   </strong>
                 </div>
                 <div className="spu-subcard p-2.5">
@@ -188,20 +217,27 @@ export default function AlertsIncidentsPage({
                 </div>
               </div>
 
-              {/* Associated Top Metrics */}
-              {(selectedEpisode.top_features || []).length > 0 && (
+              {/* Associated Evidence Drivers */}
+              {(selectedEpisode.evidence || []).length > 0 && (
                 <div>
-                  <div className="text-xs font-bold mb-1.5">Associated Telemetry Drivers</div>
+                  <div className="text-xs font-bold mb-1.5">Supporting Telemetry / Model Evidence</div>
                   <div className="space-y-1.5">
-                    {selectedEpisode.top_features.map((f) => (
+                    {selectedEpisode.evidence.map((ev, idx) => (
                       <div
-                        key={f.feature}
-                        className="flex items-center justify-between rounded-lg px-2.5 py-1.5 text-xs spu-subcard"
+                        key={`${ev.source}-${ev.metric}-${idx}`}
+                        className="rounded-lg px-2.5 py-2 text-xs spu-subcard"
                       >
-                        <span className="font-mono">{f.feature}</span>
-                        <span className="font-mono text-[var(--accent-cyan)]">
-                          {f.value} {f.unit}
-                        </span>
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono font-semibold">
+                            [{ev.source}] {ev.metric}
+                          </span>
+                          <span className="font-mono text-[var(--accent-cyan)]">
+                            {ev.value ?? '--'} {ev.threshold != null ? `(thr ${ev.threshold})` : ''}
+                          </span>
+                        </div>
+                        {ev.summary && (
+                          <div className="mt-1 text-[11px] spu-text-secondary">{ev.summary}</div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -209,14 +245,31 @@ export default function AlertsIncidentsPage({
               )}
 
               <div>
-                <div className="text-xs font-bold mb-1">Recommended Diagnostic Command</div>
+                <div className="text-xs font-bold mb-1">Recommended Diagnostic Check</div>
                 <pre
                   style={{ backgroundColor: 'var(--bg-log)' }}
                   className="overflow-x-auto rounded-lg border p-2.5 font-mono text-[11px] text-amber-400 spu-border"
                 >
-                  {selectedEpisode.playbook_cmd}
+                  {selectedEpisode.recommended_checks || selectedEpisode.playbook_cmd}
                 </pre>
               </div>
+
+              {(selectedEpisode.acknowledged_by || selectedEpisode.resolution_note) && (
+                <div className="rounded-lg border spu-border p-2.5 text-xs spu-subcard space-y-1">
+                  {selectedEpisode.acknowledged_by && (
+                    <div>
+                      <span className="spu-text-muted">Handled by:</span>{' '}
+                      <strong className="font-mono">{selectedEpisode.acknowledged_by}</strong>
+                    </div>
+                  )}
+                  {selectedEpisode.resolution_note && (
+                    <div>
+                      <span className="spu-text-muted">Note:</span>{' '}
+                      <span>{selectedEpisode.resolution_note}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Drilldown Links */}
               <div className="grid grid-cols-2 gap-2">
@@ -234,37 +287,64 @@ export default function AlertsIncidentsPage({
                   <FileTerminal className="h-3.5 w-3.5 text-[var(--accent-cyan)]" />
                   Inspect Logs
                 </button>
+                {onInvestigateIncident && (
+                  <button
+                    onClick={() => onInvestigateIncident(selectedEpisode)}
+                    className="spu-btn-primary col-span-2 inline-flex items-center justify-center gap-1.5"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" />
+                    Investigate Incident with Gemini AI
+                  </button>
+                )}
               </div>
 
               {/* Incident Workflow Controls */}
               {selectedEpisode.status !== 'resolved' && (
-                <div className="flex flex-wrap gap-2 border-t pt-3 spu-border">
-                  {selectedEpisode.status === 'active' && (
+                <div className="space-y-2.5 border-t pt-3 spu-border">
+                  <input
+                    type="text"
+                    value={actionNote}
+                    onChange={(e) => setActionNote(e.target.value)}
+                    placeholder="Optional investigation / resolution note..."
+                    className="spu-input w-full text-xs"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    {selectedEpisode.status === 'active' && (
+                      <button
+                        onClick={() => {
+                          onAlertAction(selectedEpisode.id, 'acknowledge', actionNote.trim() || null);
+                          setActionNote('');
+                        }}
+                        className="spu-btn-primary inline-flex items-center gap-1.5"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Acknowledge
+                      </button>
+                    )}
                     <button
-                      onClick={() => onAlertAction(selectedEpisode.id, 'acknowledge')}
-                      className="spu-btn-primary inline-flex items-center gap-1.5"
+                      onClick={() => {
+                        onAlertAction(selectedEpisode.id, 'silence', actionNote.trim() || null);
+                        setActionNote('');
+                      }}
+                      className="spu-btn-secondary inline-flex items-center gap-1.5"
                     >
-                      <CheckCircle2 className="h-3.5 w-3.5" /> Acknowledge
+                      <VolumeX className="h-3.5 w-3.5 text-amber-400" /> Silence 30m
                     </button>
-                  )}
-                  <button
-                    onClick={() => onAlertAction(selectedEpisode.id, 'silence')}
-                    className="spu-btn-secondary inline-flex items-center gap-1.5"
-                  >
-                    <VolumeX className="h-3.5 w-3.5 text-amber-400" /> Silence 30m
-                  </button>
-                  <button
-                    onClick={() => onAlertAction(selectedEpisode.id, 'resolve')}
-                    className="spu-btn-secondary inline-flex items-center gap-1.5"
-                  >
-                    Resolve
-                  </button>
-                  <button
-                    onClick={() => onRequestDrainNodeId(selectedEpisode.node_id)}
-                    className="rounded-lg bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-400 border border-amber-500/40 inline-flex items-center gap-1.5"
-                  >
-                    <ShieldOff className="h-3.5 w-3.5" /> Drain Node
-                  </button>
+                    <button
+                      onClick={() => {
+                        onAlertAction(selectedEpisode.id, 'resolve', actionNote.trim() || null);
+                        setActionNote('');
+                      }}
+                      className="spu-btn-secondary inline-flex items-center gap-1.5"
+                    >
+                      Resolve
+                    </button>
+                    <button
+                      onClick={() => onRequestDrainNodeId(selectedEpisode.node_id)}
+                      className="rounded-lg bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-400 border border-amber-500/40 inline-flex items-center gap-1.5"
+                    >
+                      <ShieldOff className="h-3.5 w-3.5" /> Drain Node
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

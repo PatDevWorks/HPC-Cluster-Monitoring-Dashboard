@@ -8,9 +8,9 @@ const FAULT_SCENARIOS = [
     desc: 'Simulates an MPI rank leaking ~2.8% RAM per tick + swap write surge. Triggers 2-of-2 P2 -> P1 escalation.',
   },
   {
-    id: 'thermal_shutdown',
-    label: 'Cooling Fan Degradation / Thermal Runaway',
-    desc: 'Ramps CPU package temperature past 80°C while throttling clock speed relative to peer nodes.',
+    id: 'cpu_saturation',
+    label: 'Compute CPU Saturation (Runaway Thread / Fork)',
+    desc: 'Ramps single-node CPU utilization above 95% and normalized load past warning thresholds relative to peer nodes.',
   },
   {
     id: 'disk_failure',
@@ -71,7 +71,7 @@ export default function FaultInjectionDrawer({
         </div>
 
         <p className="mt-3 text-xs leading-relaxed spu-text-secondary">
-          Available in Simulator mode: trigger controlled anomalies on a compute node to test consensus voting, persistence gating and Slurm drain workflows.
+          Available in Simulator mode: trigger controlled anomalies on a compute node to test threshold checks, persistence gating, V7/LSTM monitoring, and Slurm drain workflows. Note: real cluster hardware lacks hwmon thermal/fan/power sensors.
         </p>
 
         <div className="mt-4">

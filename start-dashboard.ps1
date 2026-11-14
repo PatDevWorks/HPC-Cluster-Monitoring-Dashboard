@@ -1,203 +1,412 @@
-
-# ============================================================
-# SOL PLAATJE A - HPC AIOps DASHBOARD LAUNCHER
-# SSH Tunnel + Prometheus + LSTM V8 + FastAPI + React
-# ============================================================
+param(
+    [string]$SshHost = "",
+    [string]$SshUser = "",
+    [int]$SshPort = 0,
+    [string]$SshKey = "",
+    [string]$V7ApiKey = "",
+    [string]$LstmApiKey = "",
+    [switch]$SkipPrompt,
+    [switch]$ForceRestart
+)
 
 $ErrorActionPreference = "Stop"
 
-# PROJECT CONFIGURATION
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = $PSScriptRoot
+$BackendDir = Join-Path $RepoRoot "backend"
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$VenvPython = Join-Path $BackendDir ".venv\Scripts\python.exe"
+$EnvFile = Join-Path $BackendDir ".env"
+$DbFile = Join-Path $BackendDir "hpc_aiops.db"
 
-$SshKey = "$env:USERPROFILE\Downloads\id_ed25519"
-$SshHost = "ubuntu@196.24.241.73"
-$SshPort = 443
-
-$PrometheusPort = 9090
-$LstmPort = 8102
-
-# ------------------------------------------------------------
-# 1. CHECK REQUIREMENTS
-# ------------------------------------------------------------
-
-Write-Host "`nChecking project requirements..." -ForegroundColor Cyan
-
-if (-not (Test-Path $SshKey)) {
-    throw "SSH key not found: $SshKey"
+function Load-DotEnv([string]$Path) {
+    $map = @{}
+    if (-not (Test-Path $Path)) { return $map }
+    foreach ($rawLine in (Get-Content -Path $Path -Encoding UTF8)) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#")) { continue }
+        $idx = $line.IndexOf("=")
+        if ($idx -lt 1) { continue }
+        $k = $line.Substring(0, $idx).Trim()
+        $v = $line.Substring($idx + 1).Trim()
+        if (($v.StartsWith('"') -and $v.EndsWith('"')) -or ($v.StartsWith("'") -and $v.EndsWith("'"))) {
+            $v = $v.Substring(1, $v.Length - 2)
+        }
+        $map[$k] = $v
+    }
+    return $map
 }
 
-if (-not (Test-Path "$Root\backend\.venv\Scripts\python.exe")) {
-    Write-Host "Creating Python virtual environment..." -ForegroundColor Yellow
-    python -m venv "$Root\backend\.venv"
-
-    & "$Root\backend\.venv\Scripts\pip.exe" install -r "$Root\backend\requirements.txt"
+function Get-ConfigValue([string]$ParamVal, [string]$EnvName, [hashtable]$DotEnvMap, [string]$DefaultVal = "") {
+    if ($ParamVal -and $ParamVal.Trim()) { return $ParamVal.Trim() }
+    $envVal = [Environment]::GetEnvironmentVariable($EnvName, "Process")
+    if (-not $envVal) { $envVal = [Environment]::GetEnvironmentVariable($EnvName, "User") }
+    if ($envVal -and $envVal.Trim()) { return $envVal.Trim() }
+    if ($DotEnvMap.ContainsKey($EnvName) -and $DotEnvMap[$EnvName]) { return [string]$DotEnvMap[$EnvName] }
+    return $DefaultVal
 }
 
-if (-not (Test-Path "$Root\frontend\node_modules")) {
-    Write-Host "Installing frontend packages..." -ForegroundColor Yellow
-    Push-Location "$Root\frontend"
-    npm install
-    Pop-Location
+function Test-TcpPort([string]$HostName, [int]$Port, [int]$TimeoutMs = 1500) {
+    if (-not $HostName -or $Port -le 0) { return $false }
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
+        if ($ok -and $client.Connected) {
+            $client.EndConnect($iar)
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
+    }
 }
 
-# ------------------------------------------------------------
-# 2. GET LSTM V8 API KEY
-# ------------------------------------------------------------
-
-Write-Host "`nLSTM V8 authentication" -ForegroundColor Cyan
-
-$SecureKey = Read-Host "Enter your existing LSTM V8 API key" -AsSecureString
-
-$BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
-
-try {
-    $LstmApiKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
-}
-finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+function Test-HttpReady([string]$Url, [int]$TimeoutSec = 2) {
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec
+        return ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 400)
+    } catch {
+        return $false
+    }
 }
 
-if ([string]::IsNullOrWhiteSpace($LstmApiKey)) {
-    throw "LSTM V8 API key cannot be empty."
+function Get-ListenPids([int]$Port) {
+    try {
+        return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique)
+    } catch {
+        return @()
+    }
 }
 
-# ------------------------------------------------------------
-# 3. START SSH TUNNEL
-# ------------------------------------------------------------
-
-Write-Host "`nChecking SSH tunnel..." -ForegroundColor Cyan
-
-$PromListener = Get-NetTCPConnection -LocalPort 9090 -State Listen -ErrorAction SilentlyContinue
-$LstmListener = Get-NetTCPConnection -LocalPort 8102 -State Listen -ErrorAction SilentlyContinue
-
-if ($PromListener -and $LstmListener) {
-    Write-Host "Both tunnel ports are already listening. Reusing them." -ForegroundColor Green
+function Resolve-SavedSshSettingsFromDb([string]$PythonExe, [string]$DbPath) {
+    if (-not (Test-Path $PythonExe) -or -not (Test-Path $DbPath)) { return @{} }
+    try {
+        $py = "import json, sqlite3, sys; conn=sqlite3.connect(sys.argv[1]); rows=conn.execute('SELECT key, value_json FROM app_settings').fetchall(); print(json.dumps({r[0]: json.loads(r[1]) for r in rows}))"
+        $raw = & $PythonExe -c $py $DbPath 2>$null
+        if ($LASTEXITCODE -eq 0 -and $raw) {
+            $obj = $raw | ConvertFrom-Json
+            $res = @{}
+            if ($obj.ssh_host) { $res["ssh_host"] = [string]$obj.ssh_host }
+            if ($obj.ssh_user) { $res["ssh_user"] = [string]$obj.ssh_user }
+            if ($obj.ssh_port) { $res["ssh_port"] = [string]$obj.ssh_port }
+            return $res
+        }
+    } catch {}
+    return @{}
 }
-elseif ($PromListener -or $LstmListener) {
-    throw "Only one tunnel port is occupied. Check existing SSH tunnels and free ports 9090 and 8102 before restarting."
+
+function Stop-ProcessIfOwnedBySsh([int]$ProcessId) {
+    try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ProcessName -match "^ssh(\.exe)?$") {
+            Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 300
+            return $true
+        }
+    } catch {}
+    return $false
 }
-else {
-    Write-Host "Opening SSH tunnel to HPC headnode..." -ForegroundColor Yellow
 
-    $TunnelCommand = "ssh -N -o ExitOnForwardFailure=yes -p $SshPort -i `"$SshKey`" -L 9090:127.0.0.1:9090 -L 8102:127.0.0.1:8102 $SshHost"
+function Stop-ProcessTree([int]$ProcessId) {
+    try {
+        & taskkill /PID $ProcessId /T /F 2>$null | Out-Null
+    } catch {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
 
-    $TunnelProcess = Start-Process powershell.exe -ArgumentList @(
-        "-NoExit",
-        "-Command",
-        $TunnelCommand
-    ) -PassThru
+Write-Host "=====================================================" -ForegroundColor Cyan
+Write-Host "  HPC AI Operations Dashboard - Unified Launcher" -ForegroundColor Cyan
+Write-Host "=====================================================" -ForegroundColor Cyan
 
-    $TunnelReady = $false
+if (-not (Test-Path $VenvPython)) {
+    throw "Backend virtualenv Python not found at $VenvPython. Create backend/.venv and install requirements first."
+}
+if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
+    throw "Frontend dependencies missing in $FrontendDir\node_modules. Run 'npm install' in frontend first."
+}
 
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 1
+$dotEnv = Load-DotEnv $EnvFile
+$dbSettings = Resolve-SavedSshSettingsFromDb $VenvPython $DbFile
 
-        $PromListener = Get-NetTCPConnection -LocalPort 9090 -State Listen -ErrorAction SilentlyContinue
-        $LstmListener = Get-NetTCPConnection -LocalPort 8102 -State Listen -ErrorAction SilentlyContinue
+# Resolve Head Node SSH Configuration
+$ResolvedSshHost = Get-ConfigValue $SshHost "HPC_SSH_HOST" $dotEnv ""
+if (-not $ResolvedSshHost -and $dbSettings.ContainsKey("ssh_host")) {
+    $ResolvedSshHost = $dbSettings["ssh_host"]
+}
+if (-not $ResolvedSshHost -and -not $SkipPrompt) {
+    $enteredHost = Read-Host "Headnode SSH Host/IP (leave blank if Prometheus/Slurm are local)"
+    if ($enteredHost) { $ResolvedSshHost = $enteredHost.Trim() }
+}
 
-        if ($PromListener -and $LstmListener) {
-            $TunnelReady = $true
+$ResolvedSshUser = Get-ConfigValue $SshUser "HPC_SSH_USER" $dotEnv ""
+if (-not $ResolvedSshUser -and $dbSettings.ContainsKey("ssh_user")) {
+    $ResolvedSshUser = $dbSettings["ssh_user"]
+}
+if (-not $ResolvedSshUser) { $ResolvedSshUser = "ubuntu" }
+
+$ResolvedSshPort = $SshPort
+if ($ResolvedSshPort -le 0) {
+    $envPortStr = Get-ConfigValue "" "HPC_SSH_PORT" $dotEnv ""
+    if (-not $envPortStr -and $dbSettings.ContainsKey("ssh_port")) { $envPortStr = $dbSettings["ssh_port"] }
+    if ($envPortStr -match "^\d+$") { $ResolvedSshPort = [int]$envPortStr }
+}
+if ($ResolvedSshHost -and $ResolvedSshPort -le 0) {
+    foreach ($candPort in @(443, 22)) {
+        if (Test-TcpPort $ResolvedSshHost $candPort 1500) {
+            $ResolvedSshPort = $candPort
             break
         }
+    }
+    if ($ResolvedSshPort -le 0) { $ResolvedSshPort = 443 }
+} elseif ($ResolvedSshHost -and $ResolvedSshPort -gt 0 -and -not (Test-TcpPort $ResolvedSshHost $ResolvedSshPort 1500)) {
+    foreach ($altPort in @(443, 22)) {
+        if ($altPort -ne $ResolvedSshPort -and (Test-TcpPort $ResolvedSshHost $altPort 1500)) {
+            Write-Host "[WARN] Port $ResolvedSshPort unreachable on $ResolvedSshHost; using open SSH port $altPort." -ForegroundColor Yellow
+            $ResolvedSshPort = $altPort
+            break
+        }
+    }
+}
+if ($ResolvedSshPort -le 0) { $ResolvedSshPort = 443 }
 
-        if ($TunnelProcess.HasExited) {
-            throw "SSH tunnel process exited. Check the SSH terminal."
+$ResolvedSshKey = Get-ConfigValue $SshKey "HPC_SSH_KEY_PATH" $dotEnv ""
+if (-not $ResolvedSshKey) {
+    $keyCandidates = @(
+        (Join-Path $HOME ".ssh\id_ed25519"),
+        (Join-Path $HOME ".ssh\id_rsa"),
+        (Join-Path $HOME "Downloads\id_ed25519"),
+        (Join-Path $HOME "Downloads\id_rsa")
+    ) | Where-Object { Test-Path $_ }
+    if ($ResolvedSshHost -and $keyCandidates.Count -gt 1) {
+        foreach ($cand in $keyCandidates) {
+            & ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -p $ResolvedSshPort -i $cand "${ResolvedSshUser}@${ResolvedSshHost}" "true" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $ResolvedSshKey = $cand
+                break
+            }
+        }
+    }
+    if (-not $ResolvedSshKey -and $keyCandidates.Count -gt 0) {
+        $ResolvedSshKey = $keyCandidates[0]
+    }
+}
+
+$TunnelProc = $null
+$BackendProc = $null
+$FrontendProc = $null
+
+try {
+    # 1. Verify / start Prometheus on Headnode and auto-establish SSH port-forwards (9090, 8101, 8102)
+    $ForwardPorts = @()
+    if ($ResolvedSshHost) {
+        Write-Host "[1/4] Checking cluster services on ${ResolvedSshUser}@${ResolvedSshHost}:${ResolvedSshPort}..." -ForegroundColor Cyan
+        $sshCmdArgs = @(
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=6",
+            "-p", "$ResolvedSshPort"
+        )
+        if ($ResolvedSshKey) { $sshCmdArgs += @("-i", $ResolvedSshKey) }
+        $sshTarget = "${ResolvedSshUser}@${ResolvedSshHost}"
+
+        $remoteProbeScript = @'
+if ! curl -sf http://127.0.0.1:9090/-/ready >/dev/null 2>&1; then
+  systemctl is-active --quiet prometheus 2>/dev/null || sudo -n systemctl start prometheus 2>/dev/null || true
+  command -v docker >/dev/null 2>&1 && docker start prometheus >/dev/null 2>&1 || true
+  sleep 2
+fi
+PROM=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9090/-/ready || echo 000)
+V7=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8101/ready || echo 000)
+LSTM=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8102/ready || echo 000)
+SLURM=$(sinfo -h -o '%a' >/dev/null 2>&1 && echo up || echo down)
+echo "PROM=$PROM V7=$V7 LSTM=$LSTM SLURM=$SLURM"
+'@ -replace "`r`n", "`n"
+
+        $probeLine = ""
+        try {
+            $probeRaw = & ssh @sshCmdArgs $sshTarget $remoteProbeScript 2>&1
+            $matchObj = $probeRaw | Select-String -Pattern "PROM=" | Select-Object -Last 1
+            if ($matchObj) {
+                $probeLine = $matchObj.Line
+                Write-Host "      Cluster telemetry probe: $probeLine" -ForegroundColor Gray
+            } else {
+                Write-Host "      [WARN] Could not parse SSH cluster probe output: $probeRaw" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "      [WARN] SSH cluster probe error: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        $serviceChecks = @(
+            @{ Port = 9090; Url = "http://127.0.0.1:9090/-/ready"; Name = "Prometheus"; AlwaysForward = $true },
+            @{ Port = 8101; Url = "http://127.0.0.1:8101/ready"; Name = "V7 Isolation Forest"; AlwaysForward = ($probeLine -match "V7=200") },
+            @{ Port = 8102; Url = "http://127.0.0.1:8102/ready"; Name = "LSTM V8"; AlwaysForward = ($probeLine -match "LSTM=200") }
+        )
+
+        foreach ($svc in $serviceChecks) {
+            $p = $svc.Port
+            $isHealthy = Test-HttpReady $svc.Url 2
+            if ($isHealthy -and -not $ForceRestart) {
+                Write-Host "      [OK] $($svc.Name) already responding on localhost:$p" -ForegroundColor Green
+                continue
+            }
+            $existingPids = Get-ListenPids $p
+            if ($existingPids.Count -gt 0) {
+                $freed = $false
+                foreach ($epid in $existingPids) {
+                    if (Stop-ProcessIfOwnedBySsh $epid) {
+                        $freed = $true
+                        Write-Host "      Cleaned stale SSH tunnel PID $epid on port $p" -ForegroundColor Yellow
+                    }
+                }
+                if (-not $freed -and (Get-ListenPids $p).Count -gt 0) {
+                    Write-Host "      [WARN] Port $p in use by non-SSH PID $($existingPids -join ','); skipping tunnel for $p" -ForegroundColor Yellow
+                    continue
+                }
+            }
+            if ($svc.AlwaysForward -or -not $probeLine) {
+                $ForwardPorts += $p
+            }
+        }
+
+        if ($ForwardPorts.Count -gt 0) {
+            $tunnelArgs = @(
+                "-N", "-T",
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ExitOnForwardFailure=yes",
+                "-o", "ServerAliveInterval=30",
+                "-o", "ServerAliveCountMax=3",
+                "-p", "$ResolvedSshPort"
+            )
+            if ($ResolvedSshKey) { $tunnelArgs += @("-i", $ResolvedSshKey) }
+            foreach ($fp in $ForwardPorts) {
+                $tunnelArgs += @("-L", "${fp}:127.0.0.1:${fp}")
+            }
+            $tunnelArgs += $sshTarget
+
+            Write-Host "      Starting unified SSH tunnel for ports: $($ForwardPorts -join ', ')..." -ForegroundColor Cyan
+            $TunnelProc = Start-Process -FilePath "ssh" -ArgumentList $tunnelArgs -WindowStyle Hidden -PassThru
+
+            $deadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $deadline) {
+                if ($TunnelProc.HasExited) {
+                    Write-Host "      [WARN] SSH tunnel exited early (code $($TunnelProc.ExitCode))." -ForegroundColor Yellow
+                    break
+                }
+                if (Test-HttpReady "http://127.0.0.1:9090/-/ready" 1) { break }
+                Start-Sleep -Milliseconds 400
+            }
+        }
+    } else {
+        Write-Host "[1/4] No SSH gateway host configured; checking local Prometheus/ML services..." -ForegroundColor Yellow
+    }
+
+    # 2. Export Live Cluster & Model Environment Variables for FastAPI Backend
+    Write-Host "[2/4] Configuring backend environment variables..." -ForegroundColor Cyan
+    $PromUrl = Get-ConfigValue "" "PROMETHEUS_URL" $dotEnv "http://localhost:9090"
+    $env:PROMETHEUS_URL = $PromUrl
+    if ($ResolvedSshHost) {
+        $env:HPC_SSH_HOST = $ResolvedSshHost
+        $env:HPC_SSH_USER = $ResolvedSshUser
+        $env:HPC_SSH_PORT = [string]$ResolvedSshPort
+        if ($ResolvedSshKey) { $env:HPC_SSH_KEY_PATH = $ResolvedSshKey }
+    }
+
+    if (Test-HttpReady "http://127.0.0.1:9090/-/ready" 2) {
+        Write-Host "      [OK] Prometheus live at $PromUrl" -ForegroundColor Green
+    } else {
+        Write-Host "      [WARN] Prometheus not responding at $PromUrl yet (backend will auto-switch once live)." -ForegroundColor Yellow
+    }
+
+    $ResolvedV7Url = Get-ConfigValue "" "V7_API_URL" $dotEnv ""
+    if (-not $ResolvedV7Url -and (Test-HttpReady "http://127.0.0.1:8101/ready" 2)) {
+        $ResolvedV7Url = "http://localhost:8101"
+    }
+    if ($ResolvedV7Url) {
+        $env:V7_API_URL = $ResolvedV7Url
+        $ResolvedV7Key = Get-ConfigValue $V7ApiKey "V7_API_KEY" $dotEnv ""
+        if ($ResolvedV7Key) { $env:V7_API_KEY = $ResolvedV7Key }
+        Write-Host "      [OK] V7 Isolation Forest API configured: $ResolvedV7Url" -ForegroundColor Green
+    }
+
+    $ResolvedLstmUrl = Get-ConfigValue "" "LSTM_V8_API_URL" $dotEnv ""
+    if (-not $ResolvedLstmUrl -and (Test-HttpReady "http://127.0.0.1:8102/ready" 2)) {
+        $ResolvedLstmUrl = "http://localhost:8102"
+    }
+    if ($ResolvedLstmUrl) {
+        $env:LSTM_V8_API_URL = $ResolvedLstmUrl
+        $ResolvedLstmKey = Get-ConfigValue $LstmApiKey "LSTM_V8_API_KEY" $dotEnv ""
+        if (-not $ResolvedLstmKey -and -not $SkipPrompt) {
+            $optKey = Read-Host "Optional LSTM V8 API key (press Enter to skip or store in backend/.env)"
+            if ($optKey) { $ResolvedLstmKey = $optKey.Trim() }
+        }
+        if ($ResolvedLstmKey) { $env:LSTM_V8_API_KEY = $ResolvedLstmKey }
+        Write-Host "      [OK] LSTM V8 API configured: $ResolvedLstmUrl" -ForegroundColor Green
+    }
+
+    # 3. Clean stale dashboard servers on 8000 / 5173 when requested or start fresh
+    foreach ($svcPort in @(8000, 5173)) {
+        $listenPids = Get-ListenPids $svcPort
+        if ($listenPids.Count -gt 0) {
+            if ($ForceRestart) {
+                foreach ($pId in $listenPids) {
+                    Stop-ProcessTree $pId
+                }
+                Start-Sleep -Milliseconds 500
+            } else {
+                throw "Port $svcPort is already in use by PID $($listenPids -join ','). Stop it or pass -ForceRestart."
+            }
         }
     }
 
-    if (-not $TunnelReady) {
-        throw "SSH tunnel failed to establish both connections."
+    Write-Host "[3/4] Starting FastAPI Backend on http://127.0.0.1:8000..." -ForegroundColor Cyan
+    $BackendProc = Start-Process -FilePath $VenvPython `
+        -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000") `
+        -WorkingDirectory $BackendDir `
+        -PassThru
+
+    $apiDeadline = (Get-Date).AddSeconds(20)
+    $apiReady = $false
+    while ((Get-Date) -lt $apiDeadline) {
+        if ($BackendProc.HasExited) {
+            throw "Backend server exited unexpectedly (code $($BackendProc.ExitCode))."
+        }
+        if (Test-HttpReady "http://127.0.0.1:8000/api/health" 2) {
+            $apiReady = $true
+            break
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    if (-not $apiReady) {
+        throw "Backend did not become healthy on http://127.0.0.1:8000/api/health within 20 seconds."
     }
 
-    Write-Host "SSH tunnels established." -ForegroundColor Green
+    Write-Host "[4/4] Starting React UI (Vite) on http://localhost:5173..." -ForegroundColor Cyan
+    $FrontendProc = Start-Process -FilePath "npm.cmd" `
+        -ArgumentList @("run", "dev", "--", "--host", "127.0.0.1", "--port", "5173") `
+        -WorkingDirectory $FrontendDir `
+        -PassThru
+
+    Write-Host ""
+    Write-Host "=====================================================" -ForegroundColor Green
+    Write-Host "  Dashboard Running!" -ForegroundColor Green
+    Write-Host "  UI:         http://localhost:5173" -ForegroundColor White
+    Write-Host "  API Health: http://127.0.0.1:8000/api/health" -ForegroundColor White
+    Write-Host "  Press Ctrl+C in this window to stop all services." -ForegroundColor Gray
+    Write-Host "=====================================================" -ForegroundColor Green
+
+    while (-not $BackendProc.HasExited -and -not $FrontendProc.HasExited) {
+        Start-Sleep -Seconds 1
+    }
+} finally {
+    Write-Host "`nStopping launched services..." -ForegroundColor Yellow
+    foreach ($proc in @($FrontendProc, $BackendProc, $TunnelProc)) {
+        if ($proc -and -not $proc.HasExited) {
+            Stop-ProcessTree $proc.Id
+        }
+    }
 }
-
-# ------------------------------------------------------------
-# 4. VERIFY PROMETHEUS
-# ------------------------------------------------------------
-
-Write-Host "`nChecking Prometheus..." -ForegroundColor Cyan
-
-try {
-    $Prometheus = Invoke-WebRequest `
-        -Uri "http://127.0.0.1:9090/-/ready" `
-        -TimeoutSec 8 `
-        -UseBasicParsing
-
-    Write-Host "Prometheus is responding." -ForegroundColor Green
-}
-catch {
-    Write-Host "WARNING: Prometheus readiness check failed: $($_.Exception.Message)" -ForegroundColor Yellow
-}
-
-# ------------------------------------------------------------
-# 5. VERIFY LSTM V8
-# ------------------------------------------------------------
-
-Write-Host "`nChecking LSTM V8..." -ForegroundColor Cyan
-
-try {
-    $Lstm = Invoke-RestMethod `
-        -Uri "http://127.0.0.1:8102/ready" `
-        -TimeoutSec 8
-
-    Write-Host "LSTM V8 API responded. Models loaded: $($Lstm.loaded)" -ForegroundColor Green
-    Write-Host "Model count: $($Lstm.model_count)" -ForegroundColor Green
-}
-catch {
-    Write-Host "WARNING: LSTM V8 readiness check failed: $($_.Exception.Message)" -ForegroundColor Yellow
-}
-
-# ------------------------------------------------------------
-# 6. START FASTAPI BACKEND
-# ------------------------------------------------------------
-
-Write-Host "`nStarting FastAPI backend..." -ForegroundColor Cyan
-
-$SafeApiKey = $LstmApiKey.Replace("'", "''")
-
-$BackendCommand = "Set-Location '$Root\backend'; `$env:LSTM_V8_API_URL='http://127.0.0.1:8102'; `$env:LSTM_V8_API_KEY='$SafeApiKey'; .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-
-Start-Process powershell.exe -ArgumentList @(
-    "-NoExit",
-    "-Command",
-    $BackendCommand
-)
-
-Write-Host "FastAPI backend launched." -ForegroundColor Green
-
-# ------------------------------------------------------------
-# 7. START REACT FRONTEND
-# ------------------------------------------------------------
-
-Write-Host "`nStarting React frontend..." -ForegroundColor Cyan
-
-$FrontendCommand = "Set-Location '$Root\frontend'; npm run dev"
-
-Start-Process powershell.exe -ArgumentList @(
-    "-NoExit",
-    "-Command",
-    $FrontendCommand
-)
-
-Write-Host "React frontend launched." -ForegroundColor Green
-
-# ------------------------------------------------------------
-# 8. DISPLAY SERVICE INFORMATION
-# ------------------------------------------------------------
-
-Write-Host "`n==================================================" -ForegroundColor Cyan
-Write-Host " SOL PLAATJE A - HPC AIOps ENVIRONMENT" -ForegroundColor Green
-Write-Host "==================================================" -ForegroundColor Cyan
-
-Write-Host "Prometheus: http://localhost:9090" -ForegroundColor White
-Write-Host "LSTM V8:    http://localhost:8102/ready" -ForegroundColor White
-Write-Host "FastAPI:    http://localhost:8000" -ForegroundColor White
-Write-Host "API Docs:   http://localhost:8000/docs" -ForegroundColor White
-Write-Host "React:      http://localhost:5173" -ForegroundColor White
-
-Write-Host "`nAll launch commands have been issued." -ForegroundColor Green
-Write-Host "Keep the SSH tunnel terminal open." -ForegroundColor Yellow
-
-Start-Sleep -Seconds 3
-Start-Process "http://localhost:5173"

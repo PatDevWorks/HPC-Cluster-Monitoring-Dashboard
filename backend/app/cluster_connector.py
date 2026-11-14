@@ -2,14 +2,16 @@ import csv
 from datetime import datetime, timezone
 import math
 import random
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import LIVE_CLUSTER_NODES, PROMETHEUS_URL, SCC_DATASET_DIR
 from .database import add_system_log, get_app_settings
 from .prometheus_service import check_prometheus_health, fetch_prometheus_cluster_snapshot
 from .slurm_service import (
-    fetch_live_slurm_jobs,
-    fetch_live_slurm_node_states,
+    fetch_live_slurm_snapshot,
+    node_id_aliases,
+    resolve_slurm_nodename,
     sanitize_reason,
 )
 from .ssh_bridge import execute_restricted_cluster_command
@@ -57,6 +59,14 @@ class ClusterTelemetryConnector:
         self.last_prometheus_error: Optional[str] = None
         self.slurm_connected: bool = False
         self.slurm_source: str = "simulator"
+        self.slurm_error: Optional[str] = None
+        self.slurm_nodes_cache: Dict[str, Dict[str, Any]] = {}
+        self._last_slurm_fetch_ts: float = 0.0
+        self._cached_slurm_jobs: Optional[List[Dict[str, Any]]] = None
+        self._cached_slurm_source: str = "simulator"
+        self._cached_slurm_error: Optional[str] = None
+        self.mode_explicitly_set: bool = False
+        self._last_prom_reprobe_ts: float = time.monotonic()
 
         # Auto-probe Prometheus on startup: if reachable, default directly to live_prometheus!
         probe = check_prometheus_health(self.prometheus_url, timeout=1.2)
@@ -170,6 +180,62 @@ class ClusterTelemetryConnector:
         if settings.get("prometheus_url"):
             self.prometheus_url = str(settings["prometheus_url"]).rstrip("/")
 
+    def invalidate_slurm_cache(self) -> None:
+        self._last_slurm_fetch_ts = 0.0
+
+    def _get_live_slurm_cached(
+        self,
+        min_interval_sec: float = 4.0,
+    ) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Dict[str, Any]], str, Optional[str]]:
+        now = time.monotonic()
+        if self._last_slurm_fetch_ts > 0.0 and (now - self._last_slurm_fetch_ts) < min_interval_sec:
+            return (
+                self._cached_slurm_jobs,
+                self.slurm_nodes_cache,
+                self._cached_slurm_source,
+                self._cached_slurm_error,
+            )
+        live_jobs, live_node_states, slurm_src, slurm_err = fetch_live_slurm_snapshot()
+        self._last_slurm_fetch_ts = now
+        self._cached_slurm_jobs = live_jobs
+        if live_node_states:
+            self.slurm_nodes_cache = live_node_states
+        elif live_jobs is None:
+            self.slurm_nodes_cache = {}
+        self._cached_slurm_source = slurm_src
+        self._cached_slurm_error = slurm_err
+        return live_jobs, self.slurm_nodes_cache, slurm_src, slurm_err
+
+    @staticmethod
+    def _overlay_slurm_sinfo(
+        nodes: List[Dict[str, Any]],
+        live_node_states: Dict[str, Dict[str, Any]],
+    ) -> None:
+        if not live_node_states:
+            return
+        alias_map: Dict[str, Dict[str, Any]] = {}
+        for snode_name, entry in live_node_states.items():
+            for alias in node_id_aliases(snode_name):
+                alias_map.setdefault(alias, entry)
+        for n in nodes:
+            entry = None
+            for candidate in (n.get("node_id", ""), n.get("hostname", "")):
+                for alias in node_id_aliases(str(candidate)):
+                    if alias in alias_map:
+                        entry = alias_map[alias]
+                        break
+                if entry:
+                    break
+            if entry:
+                n["slurm_state"] = entry["slurm_state"]
+                n["partition"] = entry["partition"]
+                if entry.get("slurm_cpus") is not None:
+                    n["slurm_cpus"] = entry["slurm_cpus"]
+                if entry.get("slurm_mem_mb") is not None:
+                    n["slurm_mem_mb"] = entry["slurm_mem_mb"]
+                if entry.get("reason"):
+                    n["slurm_reason"] = entry["reason"]
+
     def set_mode(
         self,
         mode: str,
@@ -179,6 +245,7 @@ class ClusterTelemetryConnector:
         if prometheus_url:
             self.prometheus_url = prometheus_url.rstrip("/")
         self.mode = mode
+        self.mode_explicitly_set = True
         if mode == "scc_dataset_replay":
             target_preset = preset_id or self.replay_preset_id
             self._load_replay_window(target_preset)
@@ -220,31 +287,37 @@ class ClusterTelemetryConnector:
 
     def drain_node(self, node_id: str, reason: str) -> Dict[str, Any]:
         clean_reason = sanitize_reason(reason)
+        slurm_nodename = resolve_slurm_nodename(node_id, self.slurm_nodes_cache)
         self.drained_nodes[node_id] = clean_reason
+        if slurm_nodename != node_id:
+            self.drained_nodes[slurm_nodename] = clean_reason
         ok, _out, src = execute_restricted_cluster_command(
             [
                 "scontrol",
                 "update",
-                f"NodeName={node_id}",
+                f"NodeName={slurm_nodename}",
                 "State=DRAIN",
                 f"Reason={clean_reason}",
             ],
             target_node_ip="localhost",
             timeout_sec=4.5,
         )
+        self.invalidate_slurm_cache()
         executed_mode = src if ok else "simulated_scontrol"
 
+        target_aliases = set(node_id_aliases(node_id))
+        source_jobs = (
+            self._cached_slurm_jobs
+            if self.mode == "live_prometheus" and self._cached_slurm_jobs is not None
+            else self.sim_slurm_jobs
+        )
         affected_jobs = [
-            j for j in self.sim_slurm_jobs
-            if j["state"] == "RUNNING" and node_id in j["nodes"]
+            j for j in source_jobs
+            if j.get("state") == "RUNNING"
+            and any(alias in target_aliases for jn in j.get("nodes", []) for alias in node_id_aliases(jn))
         ]
         core_hours_saved = sum(float(j["cpus"]) * max(float(j["elapsed_hours"]), 1.0) for j in affected_jobs)
-        if core_hours_saved == 0.0:
-            core_hours_saved = 48.0
-        kwh_saved = sum(
-            (float(j.get("Watts_per_node", 275)) * len(j["nodes"]) * max(float(j["elapsed_hours"]), 1.0)) / 1000.0
-            for j in affected_jobs
-        ) or 0.68
+        kwh_saved = 0.0  # Hardware power/energy telemetry unavailable on cluster nodes
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         add_system_log(
@@ -253,7 +326,7 @@ class ClusterTelemetryConnector:
             source="slurmctld",
             severity="INFO",
             event_type="slurm_drain",
-            message=f"scontrol update NodeName={node_id} State=DRAIN Reason='{clean_reason}' [{executed_mode}]",
+            message=f"scontrol update NodeName={slurm_nodename} State=DRAIN Reason='{clean_reason}' [{executed_mode}]",
         )
         return {
             "node_id": node_id,
@@ -265,12 +338,15 @@ class ClusterTelemetryConnector:
         }
 
     def resume_node(self, node_id: str) -> Dict[str, Any]:
+        slurm_nodename = resolve_slurm_nodename(node_id, self.slurm_nodes_cache)
         self.drained_nodes.pop(node_id, None)
+        self.drained_nodes.pop(slurm_nodename, None)
         ok, _out, src = execute_restricted_cluster_command(
-            ["scontrol", "update", f"NodeName={node_id}", "State=RESUME"],
+            ["scontrol", "update", f"NodeName={slurm_nodename}", "State=RESUME"],
             target_node_ip="localhost",
             timeout_sec=4.5,
         )
+        self.invalidate_slurm_cache()
         executed_mode = src if ok else "simulated_scontrol"
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         add_system_log(
@@ -279,12 +355,30 @@ class ClusterTelemetryConnector:
             source="slurmctld",
             severity="INFO",
             event_type="slurm_resume",
-            message=f"scontrol update NodeName={node_id} State=RESUME [{executed_mode}]",
+            message=f"scontrol update NodeName={slurm_nodename} State=RESUME [{executed_mode}]",
         )
         return {"node_id": node_id, "slurm_state": "ALLOCATED", "executed_mode": executed_mode}
 
     def fetch_next_batch(self) -> Dict[str, Any]:
         self.sync_from_settings()
+        if (
+            not self.mode_explicitly_set
+            and self.mode == "live_cluster_sim"
+            and (time.monotonic() - self._last_prom_reprobe_ts) >= 8.0
+        ):
+            self._last_prom_reprobe_ts = time.monotonic()
+            probe = check_prometheus_health(self.prometheus_url, timeout=1.0)
+            if probe.get("reachable") and int(probe.get("targets_count", 0)) > 0:
+                self.mode = "live_prometheus"
+                self.prometheus_connected = True
+                add_system_log(
+                    timestamp_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    node_id="cluster",
+                    source="prometheus",
+                    severity="INFO",
+                    event_type="mode_upgrade",
+                    message=f"Prometheus became reachable at {self.prometheus_url}; switched automatically to live_prometheus.",
+                )
         if self.mode == "live_prometheus":
             return self._fetch_from_prometheus()
         if self.mode == "scc_dataset_replay":
@@ -305,25 +399,25 @@ class ClusterTelemetryConnector:
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Attempt live Slurm query (local Linux or SSH gateway)
-        live_jobs, slurm_src = fetch_live_slurm_jobs()
-        live_node_states = fetch_live_slurm_node_states() if live_jobs is not None else {}
+        live_jobs, live_node_states, slurm_src, slurm_err = self._get_live_slurm_cached()
+        slurm_nodes_list = [
+            {"node_name": nid, **meta}
+            for nid, meta in sorted(live_node_states.items())
+        ]
 
         if live_jobs is not None:
             self.slurm_connected = True
             self.slurm_source = slurm_src
+            self.slurm_error = None
         else:
             self.slurm_connected = False
-            self.slurm_source = "unavailable"
+            self.slurm_source = slurm_src or "unavailable"
+            self.slurm_error = slurm_err
 
         if nodes_out is not None:
             self.prometheus_connected = True
             self.last_prometheus_error = None
-            # Overlay live Slurm node states if discovered via sinfo
-            for n in nodes_out:
-                sinfo_entry = live_node_states.get(n["node_id"]) or live_node_states.get(n.get("hostname", ""))
-                if sinfo_entry:
-                    n["slurm_state"] = sinfo_entry["slurm_state"]
-                    n["partition"] = sinfo_entry["partition"]
+            self._overlay_slurm_sinfo(nodes_out, live_node_states)
             return {
                 "timestamp_utc": now_iso,
                 "is_synthetic": False,
@@ -331,6 +425,8 @@ class ClusterTelemetryConnector:
                 "prometheus_connected": True,
                 "slurm_connected": self.slurm_connected,
                 "slurm_source": self.slurm_source,
+                "slurm_error": self.slurm_error,
+                "slurm_nodes": slurm_nodes_list,
                 "mode_label": f"Live Prometheus ({self.prometheus_url})",
                 "nodes": nodes_out,
                 "slurm_jobs": live_jobs if live_jobs is not None else [],
@@ -356,6 +452,7 @@ class ClusterTelemetryConnector:
                     "cpu_cores": meta["cpu_cores"],
                     "memory_gib": meta["memory_gib"],
                     "up": 0,
+                    "prometheus_offline": True,
                     "simulated_scrape_gap": True,
                     "planned_maintenance": 0,
                     "slurm_state": "UNKNOWN (PROMETHEUS OFFLINE)",
@@ -384,6 +481,7 @@ class ClusterTelemetryConnector:
                 }
             )
 
+        self._overlay_slurm_sinfo(unavailable_nodes, live_node_states)
         return {
             "timestamp_utc": now_iso,
             "is_synthetic": False,
@@ -391,6 +489,8 @@ class ClusterTelemetryConnector:
             "prometheus_connected": False,
             "slurm_connected": self.slurm_connected,
             "slurm_source": self.slurm_source,
+            "slurm_error": self.slurm_error,
+            "slurm_nodes": slurm_nodes_list,
             "mode_label": f"Live Prometheus — Offline ({self.prometheus_url})",
             "source_warning": (
                 f"Prometheus unreachable at {self.prometheus_url} ({self.last_prometheus_error}). "

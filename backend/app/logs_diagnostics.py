@@ -264,15 +264,11 @@ def build_node_diagnostic_bundle_zip(
             "generated_utc": now_iso,
             "node_id": node_id,
             "sanitized": True,
-            "model_engine": {
-                "engine_mode": model_status.get("engine_mode"),
-                "engine_label": model_status.get("engine_label"),
-                "detectors": model_status.get("detectors"),
-            },
+            "model_services": model_status,
         }
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
         zf.writestr(
-            f"{node_id}_telemetry_and_ai_prediction.json",
+            f"{node_id}_telemetry_and_status.json",
             json.dumps(_sanitize_node_snapshot(node), indent=2),
         )
 

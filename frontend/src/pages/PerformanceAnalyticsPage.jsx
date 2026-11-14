@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Download,
   FileText,
+  FlaskConical, Sparkles,
 } from 'lucide-react';
 import {
   Area,
@@ -30,7 +31,7 @@ const RANGE_MINUTES_MAP = {
   '24h': 1440,
 };
 
-export default function PerformanceAnalyticsPage({ snapshot }) {
+export default function PerformanceAnalyticsPage({ snapshot, onNavigate }) {
   const { chartTheme } = useTheme();
   const [rangeKey, setRangeKey] = useState('1h');
   const [historySeries, setHistorySeries] = useState([]);
@@ -91,6 +92,26 @@ export default function PerformanceAnalyticsPage({ snapshot }) {
             ))}
           </div>
 
+          {onNavigate && (
+            <>
+              <button
+                type="button"
+                onClick={() => onNavigate('experiments')}
+                className="spu-btn-secondary inline-flex items-center gap-1.5"
+              >
+                <FlaskConical className="h-3.5 w-3.5 text-[var(--accent-cyan)]" />
+                Experiments
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate('intelligence')}
+                className="spu-btn-secondary inline-flex items-center gap-1.5"
+              >
+                <Sparkles className="h-3.5 w-3.5 text-[var(--accent-cyan)]" />
+                Ask Gemini
+              </button>
+            </>
+          )}
           <a
             href={api.getReportExportUrl('performance_history', 'csv', rangeMins)}
             className="spu-btn-secondary inline-flex items-center gap-1.5"

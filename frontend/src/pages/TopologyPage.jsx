@@ -64,23 +64,11 @@ export default function TopologyPage({
           </div>
           <div>
             <h2 className="text-xl font-bold tracking-tight">Cluster Topology</h2>
-            <p className="text-xs spu-text-secondary">
-              Interactive HPC architecture, network links, Slurm states &amp; discovered node specifications
-            </p>
+            
           </div>
         </div>
 
-        <div className="flex items-center gap-3 text-xs spu-text-secondary">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" /> Online
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-amber-400" /> Drained / Warning
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-rose-500" /> Offline / Critical
-          </span>
-        </div>
+        
       </div>
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
@@ -108,7 +96,11 @@ export default function TopologyPage({
                   <div className="flex items-center gap-2.5">
                     <span
                       className={`h-3 w-3 rounded-full ${
-                        headNode.up === 1 ? 'bg-emerald-400' : 'bg-rose-500'
+                        headNode.health_status === 'offline' || headNode.health_status === 'critical' || headNode.up !== 1
+                          ? 'bg-rose-500'
+                          : headNode.health_status === 'warning' || headNode.health_status === 'stale'
+                          ? 'bg-amber-400'
+                          : 'bg-emerald-400'
                       }`}
                     />
                     <div>
@@ -155,17 +147,28 @@ export default function TopologyPage({
             >
               {computeNodes.map((node) => {
                 const up = node.up === 1;
+                const hs = node.health_status || (up ? 'healthy' : 'offline');
+                const hasV7Anom = Boolean(node.v7_detection?.is_anomaly);
+                const hasLstmWarn = Boolean(node.lstm_v8_status?.latest_warning?.is_warning);
                 const isDrained = String(node.slurm_state || '').includes('DRAIN');
                 const netErr = Number(node.network_errors_per_second || 0);
                 const selected = selectedNode?.node_id === node.node_id;
 
-                const statusColor = !up
-                  ? 'border-rose-500/70'
-                  : isDrained || node.alert_priority === 'P2'
-                  ? 'border-amber-500/70'
-                  : selected
-                  ? 'border-[var(--accent-cyan)]'
-                  : 'border-[var(--border-subtle)]';
+                const statusColor =
+                  !up || hs === 'offline' || hs === 'critical'
+                    ? 'border-rose-500/70'
+                    : hs === 'stale' || hs === 'warning' || hs === 'maintenance' || isDrained || hasV7Anom || hasLstmWarn
+                    ? 'border-amber-500/70'
+                    : selected
+                    ? 'border-[var(--accent-cyan)]'
+                    : 'border-[var(--border-subtle)]';
+
+                const dotBg =
+                  !up || hs === 'offline' || hs === 'critical'
+                    ? 'bg-rose-500'
+                    : hs === 'stale' || hs === 'warning' || hs === 'maintenance' || isDrained || hasV7Anom || hasLstmWarn
+                    ? 'bg-amber-400'
+                    : 'bg-emerald-400';
 
                 return (
                   <div
@@ -175,15 +178,7 @@ export default function TopologyPage({
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <span
-                          className={`h-2.5 w-2.5 rounded-full ${
-                            !up
-                              ? 'bg-rose-500'
-                              : isDrained
-                              ? 'bg-amber-400'
-                              : 'bg-emerald-400'
-                          }`}
-                        />
+                        <span className={`h-2.5 w-2.5 rounded-full ${dotBg}`} />
                         <span className="text-sm font-bold">
                           {node.display_name || node.node_id}
                         </span>
@@ -215,10 +210,13 @@ export default function TopologyPage({
                       </div>
                     </div>
 
-                    <div className="mt-2 flex items-center justify-between text-[10.5px] spu-text-muted">
-                      <span>
-                        {node.cpu_cores} Cores • {node.memory_gib} GiB
-                      </span>
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-1 text-[10px] spu-text-muted">
+                      <span className="uppercase font-mono">{hs}</span>
+                      {(hasV7Anom || hasLstmWarn) && (
+                        <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-mono text-amber-300">
+                          {[hasV7Anom ? 'V7' : null, hasLstmWarn ? 'LSTM' : null].filter(Boolean).join('+')}
+                        </span>
+                      )}
                       <span className={netErr > 0.2 ? 'text-rose-400 font-semibold' : ''}>
                         {netErr > 0 ? `${netErr.toFixed(2)} err/s` : 'Link OK'}
                       </span>
@@ -283,10 +281,26 @@ export default function TopologyPage({
                         : 'Unavailable',
                     ],
                     [
-                      'Health & 1h AI Risk',
-                      `${Math.round(selectedNode.node_health_score ?? 0)}% • ${(
-                        (selectedNode.failure_prob_1h || 0) * 100
-                      ).toFixed(2)}% risk`,
+                      'Operational Status',
+                      `${selectedNode.health_classification || selectedNode.health_status || 'Healthy'} (${selectedNode.alert_priority || 'OK'})`,
+                    ],
+                    [
+                      'V7 Isolation Forest',
+                      selectedNode.v7_detection?.anomaly_score != null
+                        ? `${selectedNode.v7_detection.anomaly_score.toFixed(4)} (${selectedNode.v7_detection.is_anomaly ? 'Anomaly' : 'Normal'})`
+                        : selectedNode.v7_detection?.status || 'Pending',
+                    ],
+                    [
+                      'LSTM V8 Warning',
+                      selectedNode.lstm_v8_status?.latest_warning
+                        ? `${selectedNode.lstm_v8_status.latest_warning.status || (selectedNode.lstm_v8_status.latest_warning.is_warning ? 'WARNING' : 'NORMAL')} (${Number(selectedNode.lstm_v8_status.latest_warning.warning_score ?? 0).toFixed(3)})`
+                        : 'Unavailable',
+                    ],
+                    [
+                      'Last Telemetry Update',
+                      selectedNode.last_telemetry_utc
+                        ? selectedNode.last_telemetry_utc.slice(0, 19).replace('T', ' ') + 'Z'
+                        : 'Unavailable',
                     ],
                   ].map(([k, v]) => (
                     <div

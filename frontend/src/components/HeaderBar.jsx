@@ -139,9 +139,7 @@ export default function HeaderBar({
               </span>
             </div>
 
-            <p className="text-[11.5px] spu-text-secondary">
-              Monitor • Analyse • Predict • Optimise
-            </p>
+           
           </div>
         </div>
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
   BarChart2,
   Bell,
@@ -61,7 +62,8 @@ export default function OverviewPage({
 }) {
   const { chartTheme } = useTheme();
   const [rangeKey, setRangeKey] = useState('1h');
-  const [healthSeries, setHealthSeries] = useState([]);
+  const [telemetrySeries, setTelemetrySeries] = useState([]);
+  const [nodeFilter, setNodeFilter] = useState('all');
 
   const kpis = snapshot?.kpis || {};
   const nodes = snapshot?.nodes || [];
@@ -74,15 +76,11 @@ export default function OverviewPage({
       .getMonitoringHistory(rangeKey, null)
       .then((res) => {
         if (!cancelled && res?.series?.length > 0) {
-          setHealthSeries(
+          setTelemetrySeries(
             res.series.map((pt) => ({
               time: pt.time,
-              health_score:
-                pt.health_score != null
-                  ? pt.health_score
-                  : pt.cpu != null
-                  ? Math.max(5, Math.min(100, 100 - Math.max(0, pt.cpu - 88) * 0.8))
-                  : null,
+              cpu_percent: pt.cpu,
+              memory_percent: pt.memory,
             }))
           );
         }
@@ -96,29 +94,27 @@ export default function OverviewPage({
   const chartData =
     clusterHistory.length >= 3 && rangeKey === '1h'
       ? clusterHistory
-      : healthSeries.length > 0
-      ? healthSeries
+      : telemetrySeries.length > 0
+      ? telemetrySeries
       : clusterHistory;
 
   const nodesOnline = kpis.nodes_online ?? 0;
   const nodesTotal = kpis.nodes_total ?? 4;
+  const nodesOffline = kpis.nodes_offline ?? 0;
   const cpuPct = kpis.cluster_cpu_percent;
   const memPct = kpis.cluster_memory_percent;
-  const riskPct = kpis.peak_failure_prob_pct ?? 0;
-  const healthScore = Math.round(kpis.cluster_health_score ?? 98);
-  const healthLabel = kpis.cluster_health_label || 'Excellent';
+  const clusterStatus = kpis.cluster_status || 'healthy';
+  const clusterStatusLabel = kpis.cluster_status_label || 'Healthy';
 
   const allNodesOnline = nodesOnline === nodesTotal && nodesTotal > 0;
   const activeEpisodes = episodes.filter(
     (e) => e.status === 'active' || e.status === 'acknowledged'
   );
 
-  const healthColor =
-    healthScore >= 90
+  const statusColor =
+    clusterStatus === 'healthy'
       ? chartTheme.emerald
-      : healthScore >= 75
-      ? chartTheme.cyan
-      : healthScore >= 55
+      : clusterStatus === 'warning'
       ? chartTheme.amber
       : chartTheme.red;
 
@@ -133,7 +129,12 @@ export default function OverviewPage({
           <div>
             <h2 className="text-xl font-bold tracking-tight">Overview</h2>
             <p className="text-xs spu-text-secondary">
-              Real-time cluster status at a glance
+              Latest sample:{' '}
+              <span className="font-mono">
+                {kpis.latest_telemetry_utc
+                  ? `${kpis.latest_telemetry_utc.slice(0, 19).replace('T', ' ')}Z`
+                  : 'Waiting for telemetry'}
+              </span>
             </p>
           </div>
         </div>
@@ -154,6 +155,21 @@ export default function OverviewPage({
             />
             {nodesOnline > 0 ? 'Cluster Online' : 'Cluster Unreachable'}
           </span>
+
+          {/* Node Filter */}
+          <select
+            value={nodeFilter}
+            onChange={(e) => setNodeFilter(e.target.value)}
+            className="spu-input py-1.5 px-2.5 text-xs font-medium"
+            title="Filter Overview nodes"
+          >
+            <option value="all">All Nodes ({nodes.length})</option>
+            {nodes.map((n) => (
+              <option key={n.node_id} value={n.node_id}>
+                {n.display_name || n.node_id}
+              </option>
+            ))}
+          </select>
 
           {/* Time Window Selector */}
           <div className="relative inline-flex items-center">
@@ -186,7 +202,8 @@ export default function OverviewPage({
       <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {/* 1. Nodes Online */}
         <div
-          className="spu-card flex items-center justify-between p-4"
+          onClick={() => onNavigate('topology')}
+          className="spu-card flex cursor-pointer items-center justify-between p-4 transition hover:border-[var(--accent-cyan)]"
           style={{ borderLeft: `3px solid ${allNodesOnline ? '#10b981' : '#f59e0b'}` }}
         >
           <div className="flex items-center gap-3.5">
@@ -209,7 +226,8 @@ export default function OverviewPage({
 
         {/* 2. CPU Utilisation */}
         <div
-          className="spu-card flex items-center justify-between p-4"
+          onClick={() => onNavigate('monitoring')}
+          className="spu-card flex cursor-pointer items-center justify-between p-4 transition hover:border-[var(--accent-cyan)]"
           style={{ borderLeft: `3px solid ${chartTheme.cyan}` }}
         >
           <div className="flex items-center gap-3.5">
@@ -232,7 +250,8 @@ export default function OverviewPage({
 
         {/* 3. Memory Utilisation */}
         <div
-          className="spu-card flex items-center justify-between p-4"
+          onClick={() => onNavigate('monitoring')}
+          className="spu-card flex cursor-pointer items-center justify-between p-4 transition hover:border-[var(--accent-cyan)]"
           style={{ borderLeft: `3px solid ${chartTheme.purple}` }}
         >
           <div className="flex items-center gap-3.5">
@@ -255,14 +274,15 @@ export default function OverviewPage({
           />
         </div>
 
-        {/* 4. AI Failure Risk */}
-        <div
-          className="spu-card flex items-center justify-between p-4"
+        {/* 4. Active Incidents & Slurm Queue */}
+        <button
+          onClick={() => onNavigate(activeEpisodes.length > 0 ? 'alerts' : 'jobs')}
+          className="spu-card flex items-center justify-between p-4 text-left transition hover:border-[var(--accent-cyan)]"
           style={{
             borderLeft: `3px solid ${
-              riskPct >= 40
+              (kpis.p1_count || 0) > 0
                 ? chartTheme.red
-                : riskPct >= 18
+                : activeEpisodes.length > 0
                 ? chartTheme.amber
                 : chartTheme.emerald
             }`,
@@ -271,52 +291,128 @@ export default function OverviewPage({
           <div className="flex items-center gap-3.5">
             <div
               className={`flex h-11 w-11 items-center justify-center rounded-xl ${
-                riskPct >= 40
+                (kpis.p1_count || 0) > 0
                   ? 'bg-rose-500/15 text-rose-400'
-                  : riskPct >= 18
+                  : activeEpisodes.length > 0
                   ? 'bg-amber-500/15 text-amber-400'
                   : 'bg-emerald-500/15 text-emerald-400'
               }`}
             >
-              <Zap className="h-5 w-5" />
+              <AlertTriangle className="h-5 w-5" />
             </div>
             <div>
               <div className="text-2xl font-extrabold tracking-tight">
-                {riskPct.toFixed(1)}%
+                {activeEpisodes.length}
               </div>
-              <div className="text-xs font-medium spu-text-secondary">AI Failure Risk</div>
+              <div className="text-xs font-medium spu-text-secondary">
+                Active Incidents • {kpis.active_slurm_jobs ?? 0} Running Jobs
+              </div>
             </div>
           </div>
-          <MiniSparkline
-            data={clusterHistory}
-            dataKey="failure_risk_pct"
-            color={
-              riskPct >= 40
-                ? chartTheme.red
-                : riskPct >= 18
-                ? chartTheme.amber
-                : chartTheme.emerald
-            }
-          />
-        </div>
+          <div className="text-right font-mono text-[10px] spu-text-muted">
+            <div>{kpis.pending_slurm_jobs ?? 0} Pending</div>
+            <div>{kpis.failed_slurm_jobs ?? 0} Failed</div>
+          </div>
+        </button>
       </section>
 
-      {/* Main Content: A. Cluster Health + B. Node Status */}
+      {/* Integration & Model Status Strip (Kept Strictly Separate) */}
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5 text-xs">
+        {[
+          {
+            label: 'Prometheus',
+            status: kpis.prometheus_status || 'offline',
+            sub: kpis.latest_telemetry_utc
+              ? `Updated ${kpis.latest_telemetry_utc.slice(11, 19)}Z`
+              : 'No collection yet',
+            page: 'monitoring',
+          },
+          {
+            label: 'V7 Isolation Forest',
+            status: kpis.v7_api_status || 'not_configured',
+            sub: `${kpis.nodes_with_v7_anomaly ?? 0} anomaly flag(s)`,
+            page: 'predictions',
+          },
+          {
+            label: 'LSTM V8 Forecaster',
+            status: kpis.lstm_v8_api_status || 'connecting',
+            sub: `${kpis.nodes_with_lstm_warning ?? 0} warning flag(s)`,
+            page: 'predictions',
+          },
+          {
+            label: 'Gemini LLM',
+            status: kpis.gemini_status || 'not_configured',
+            sub: 'AI Intelligence & Reports',
+            page: 'intelligence',
+          },
+          {
+            label: 'Slurm Workload',
+            status: snapshot?.slurm_connected ? 'connected' : 'unavailable',
+            sub: snapshot?.slurm_connected
+              ? `${kpis.active_slurm_jobs ?? 0} active / ${kpis.pending_slurm_jobs ?? 0} pending${
+                  (snapshot?.slurm_nodes || []).length > 0
+                    ? ' • ' + snapshot.slurm_nodes.length + ' nodes'
+                    : ''
+                }`
+              : snapshot?.slurm_error
+              ? 'Slurm CLI unreachable — check SSH'
+              : `${kpis.active_slurm_jobs ?? 0} active / ${kpis.pending_slurm_jobs ?? 0} pending`,
+            page: 'jobs',
+          },
+        ].map((svc) => {
+          const isOk =
+            svc.status === 'connected' ||
+            svc.status === 'configured' ||
+            svc.status === 'ready';
+          const isWarn =
+            svc.status === 'simulated' ||
+            svc.status === 'connecting' ||
+            svc.status === 'not_configured';
+          return (
+            <button
+              key={svc.label}
+              onClick={() => onNavigate(svc.page)}
+              className="spu-card flex items-center justify-between px-3.5 py-2.5 text-left transition hover:border-[var(--accent-cyan)]"
+            >
+              <div>
+                <div className="font-bold">{svc.label}</div>
+                <div className="text-[11px] spu-text-muted">{svc.sub}</div>
+              </div>
+              <span
+                className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                  isOk
+                    ? 'bg-emerald-500/15 text-emerald-400'
+                    : isWarn
+                    ? 'bg-amber-500/15 text-amber-400'
+                    : 'bg-rose-500/15 text-rose-400'
+                }`}
+              >
+                {svc.status}
+              </span>
+            </button>
+          );
+        })}
+      </section>
+
+      {/* Main Content: A. Cluster Compute & Memory Utilisation + B. Node Status */}
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-        {/* A. Cluster Health */}
+        {/* A. Cluster Compute & Memory Utilisation */}
         <div className="spu-card p-5 lg:col-span-8">
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <Activity className="h-4 w-4 text-[var(--accent-cyan)]" />
-              <h3 className="text-base font-bold">Cluster Health</h3>
+              <h3 className="text-base font-bold">Cluster CPU &amp; Memory Utilisation</h3>
             </div>
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium spu-text-secondary">
-              <span
-                className="h-2.5 w-2.5 rounded-full"
-                style={{ backgroundColor: chartTheme.cyan }}
-              />
-              Health Score
-            </span>
+            <div className="flex items-center gap-3 text-xs font-medium spu-text-secondary">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: chartTheme.cyan }} />
+                CPU %
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: chartTheme.purple }} />
+                Memory %
+              </span>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 items-center gap-4 md:grid-cols-12">
@@ -324,9 +420,13 @@ export default function OverviewPage({
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData}>
                   <defs>
-                    <linearGradient id="overviewHealthGrad" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id="overviewCpuGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={chartTheme.cyan} stopOpacity={0.32} />
                       <stop offset="95%" stopColor={chartTheme.cyan} stopOpacity={0.02} />
+                    </linearGradient>
+                    <linearGradient id="overviewMemGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={chartTheme.purple} stopOpacity={0.28} />
+                      <stop offset="95%" stopColor={chartTheme.purple} stopOpacity={0.02} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} />
@@ -345,14 +445,26 @@ export default function OverviewPage({
                   />
                   <Tooltip
                     contentStyle={chartTheme.tooltipStyle}
-                    formatter={(val) => [`${val}%`, 'Health Score']}
+                    formatter={(val, name) => [
+                      val != null ? `${Number(val).toFixed(1)}%` : '--',
+                      name === 'cpu_percent' ? 'CPU' : 'Memory',
+                    ]}
                   />
                   <Area
                     type="monotone"
-                    dataKey="health_score"
+                    dataKey="cpu_percent"
                     stroke={chartTheme.cyan}
-                    strokeWidth={2.5}
-                    fill="url(#overviewHealthGrad)"
+                    strokeWidth={2}
+                    fill="url(#overviewCpuGrad)"
+                    isAnimationActive={false}
+                    connectNulls={false}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="memory_percent"
+                    stroke={chartTheme.purple}
+                    strokeWidth={2}
+                    fill="url(#overviewMemGrad)"
                     isAnimationActive={false}
                     connectNulls={false}
                   />
@@ -361,16 +473,13 @@ export default function OverviewPage({
             </div>
 
             <div className="flex flex-col items-center justify-center border-t pt-4 md:col-span-3 md:border-t-0 md:border-l md:pt-0 spu-border">
-              <div className="text-4xl font-extrabold tracking-tight">{healthScore}%</div>
-              <div
-                className="mt-1.5 inline-flex items-center gap-1.5 text-sm font-semibold"
-                style={{ color: healthColor }}
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                {healthLabel}
+              <div className="text-3xl font-extrabold tracking-tight" style={{ color: statusColor }}>
+                {clusterStatusLabel}
               </div>
-              <div className="mt-2 text-center text-[11px] spu-text-muted">
-                Composite availability &amp; anomaly health
+              <div className="mt-2 space-y-1 text-center text-[11px] font-mono spu-text-secondary">
+                <div>{nodesOnline} Online • {nodesOffline} Offline</div>
+                <div>{kpis.nodes_warning ?? 0} Warning • {kpis.nodes_critical ?? 0} Critical</div>
+                <div>{kpis.nodes_stale ?? 0} Stale Telemetry</div>
               </div>
             </div>
           </div>
@@ -395,21 +504,19 @@ export default function OverviewPage({
                 <CheckCircle2 className="h-3 w-3" />
                 {allNodesOnline && activeEpisodes.length === 0
                   ? 'All Nodes Healthy'
-                  : `${activeEpisodes.length} Attention`}
+                  : `${activeEpisodes.length} Active Incident(s)`}
               </span>
             </div>
 
             <div className="divide-y spu-border">
-              {nodes.slice(0, 6).map((node) => {
-                const up = node.up === 1;
-                const isDrained = String(node.slurm_state || '').includes('DRAIN');
-                const dotColor = !up
-                  ? 'bg-rose-500'
-                  : isDrained || node.alert_priority === 'P2'
-                  ? 'bg-amber-400'
-                  : node.alert_priority === 'P1'
-                  ? 'bg-rose-500'
-                  : 'bg-emerald-400';
+              {(nodeFilter === 'all' ? nodes : nodes.filter((n) => n.node_id === nodeFilter)).slice(0, 6).map((node) => {
+                const st = node.health_status || (node.up === 1 ? 'healthy' : 'offline');
+                const dotColor =
+                  st === 'offline' || st === 'critical'
+                    ? 'bg-rose-500'
+                    : st === 'warning' || st === 'stale' || st === 'maintenance'
+                    ? 'bg-amber-400'
+                    : 'bg-emerald-400';
 
                 return (
                   <button
@@ -424,11 +531,10 @@ export default function OverviewPage({
                           {node.display_name || node.node_id}
                         </div>
                         <div className="text-[11px] spu-text-muted">
-                          {!up
-                            ? 'Offline'
-                            : `${node.health_classification || 'Healthy'} (${Math.round(
-                                node.node_health_score ?? 100
-                              )}%)`}
+                          {node.health_classification || st} • CPU{' '}
+                          {node.cpu_utilization_percent != null
+                            ? `${Math.round(node.cpu_utilization_percent)}%`
+                            : 'N/A'}
                         </div>
                       </div>
                     </div>

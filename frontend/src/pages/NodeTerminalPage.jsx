@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
+  Lock, History,
 } from 'lucide-react';
 import { api } from '../api.js';
 import ConfirmModal from '../components/ConfirmModal.jsx';
@@ -72,7 +73,7 @@ export default function NodeTerminalPage({
             timestamp: nowTime,
             output:
               `Sol Plaatje A Dev Cluster Dashboard — Instance Console (${activeNode.display_name || activeNode.node_id})\n` +
-              `Host IP: ${activeNode.ip} | Role: ${activeNode.role} | Slurm: ${activeNode.slurm_state} | Health: ${activeNode.node_health_score ?? '--'}%\n` +
+              `Host IP: ${activeNode.ip} | Role: ${activeNode.role} | Slurm: ${activeNode.slurm_state} | Status: ${activeNode.health_classification || activeNode.health_status || 'Healthy'}\n` +
               `Type 'help' to list permitted diagnostic commands, 'status' for live telemetry, or select a Quick Command.`,
           },
         ],
@@ -90,18 +91,49 @@ export default function NodeTerminalPage({
 
   const sshStatus = snapshot?.ssh_status || {};
   const sshUser = sshStatus.ssh_user || 'ubuntu';
-  const sshHost = sshStatus.ssh_host || '196.24.241.73';
+  const sshHost = sshStatus.ssh_host || '<configure-ssh-host-in-settings>';
+  const sshPort = Number(sshStatus.ssh_port || 22);
   const isLiveHostShell = Boolean(
     sshStatus.local_linux_execution || sshStatus.ssh_gateway_configured
   );
 
   const nativeSshCommand = useMemo(() => {
     if (!activeNode) return '';
-    if (activeNode.role === 'management' || activeNode.node_id === 'head-node') {
-      return `ssh -i "$HOME\\Downloads\\id_ed25519" ${sshUser}@${sshHost}`;
+    const portFlag = sshPort && sshPort !== 22 ? ` -p ${sshPort}` : '';
+    const isHead =
+      activeNode.role === 'management' ||
+      activeNode.node_id === 'head-node' ||
+      activeNode.node_id === 'headnode';
+    if (isHead) {
+      return `ssh${portFlag} ${sshUser}@${sshHost}`;
     }
-    return `ssh -i "$HOME\\Downloads\\id_ed25519" -J ${sshUser}@${sshHost} ${sshUser}@${activeNode.ip}`;
-  }, [activeNode, sshHost, sshUser]);
+    const jumpTarget = sshPort && sshPort !== 22 ? `${sshUser}@${sshHost}:${sshPort}` : `${sshUser}@${sshHost}`;
+    return `ssh -J ${jumpTarget} ${sshUser}@${activeNode.ip}`;
+  }, [activeNode, sshHost, sshPort, sshUser]);
+
+  const [terminalEnabled, setTerminalEnabled] = useState(true);
+  const [auditEntries, setAuditEntries] = useState([]);
+
+  const loadTerminalState = async () => {
+    try {
+      const [presetRes, auditRes] = await Promise.allSettled([
+        api.getTerminalPresets(),
+        api.getTerminalAudit(30),
+      ]);
+      if (presetRes.status === 'fulfilled' && presetRes.value?.enabled !== undefined) {
+        setTerminalEnabled(Boolean(presetRes.value.enabled));
+      }
+      if (auditRes.status === 'fulfilled') {
+        setAuditEntries(auditRes.value?.entries || []);
+      }
+    } catch {
+      // keep existing state
+    }
+  };
+
+  React.useEffect(() => {
+    loadTerminalState();
+  }, []);
 
   const appendEntry = (nodeId, entry) => {
     setSessions((prev) => ({
@@ -167,6 +199,7 @@ export default function NodeTerminalPage({
       });
     } finally {
       setRunning(false);
+      loadTerminalState();
       setTimeout(() => inputRef.current?.focus(), 20);
     }
   };
@@ -355,6 +388,26 @@ export default function NodeTerminalPage({
         )}
       </div>
 
+      {!terminalEnabled && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">
+          <div className="flex items-center gap-2">
+            <Lock className="h-4 w-4 shrink-0" />
+            <span>
+              Operations Terminal is disabled by policy (<code className="font-mono">restricted_terminal_enabled = false</code>). Command executions return 403 and are logged to the security audit table.
+            </span>
+          </div>
+          {onNavigate && (
+            <button
+              type="button"
+              onClick={() => onNavigate('settings')}
+              className="rounded-lg border border-rose-400/50 px-2.5 py-1 font-semibold hover:bg-rose-500/20"
+            >
+              Enable in System Settings
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Main Console + Quick Command Palette */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
         {/* Left/Center: Interactive Console Window */}
@@ -487,7 +540,7 @@ export default function NodeTerminalPage({
                   </span>
                 </div>
                 <span className="font-mono text-[11px] font-semibold text-emerald-400">
-                  Health {activeNode.node_health_score ?? '--'}%
+                  {activeNode.health_classification || activeNode.health_status || 'Healthy'}
                 </span>
               </div>
               <div className="mt-2.5 grid grid-cols-2 gap-2 text-[11px]">
@@ -550,6 +603,41 @@ export default function NodeTerminalPage({
             <p className="mt-1.5 leading-relaxed">
               Commands execute via non-shell argument vectors (`6s` timeout, `512 KB` ceiling) with automatic private-key &amp; token redaction. Disruptive daemon or Slurm mutations require explicit confirmation and are recorded in the audit log.
             </p>
+          </div>
+
+          {/* Persistent Execution Audit Trail */}
+          <div className="spu-card p-4 text-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="inline-flex items-center gap-1.5 font-bold">
+                <History className="h-3.5 w-3.5 text-[var(--accent-cyan)]" />
+                Recent Terminal Audit ({auditEntries.length})
+              </span>
+              <button
+                type="button"
+                onClick={loadTerminalState}
+                className="text-[11px] text-[var(--accent-cyan)] hover:underline"
+              >
+                Refresh
+              </button>
+            </div>
+            <div className="max-h-48 space-y-1.5 overflow-y-auto font-mono text-[10.5px]">
+              {auditEntries.length === 0 ? (
+                <div className="spu-text-muted">No terminal executions recorded yet.</div>
+              ) : (
+                auditEntries.slice(0, 12).map((row) => (
+                  <div key={row.id} className="rounded-lg border spu-border px-2.5 py-1.5 spu-subcard">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={row.allowed ? 'text-emerald-400' : 'text-rose-400'}>
+                        {row.allowed ? 'ALLOW' : 'BLOCK'} • {row.node_id}
+                      </span>
+                      <span className="spu-text-muted">{row.timestamp_utc?.slice(11, 19)}Z</span>
+                    </div>
+                    <div className="truncate font-semibold">{row.command}</div>
+                    <div className="spu-text-muted truncate">{row.actor_email || 'admin'} • {row.execution_mode}</div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>

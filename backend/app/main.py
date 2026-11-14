@@ -3,9 +3,14 @@ load_dotenv()
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
+import csv
 from datetime import datetime, timedelta, timezone
-import statistics
+import io
+import json
 import logging
+from pathlib import Path
+import statistics
+import tempfile
 from .auth_routes import router as auth_router
 from typing import Any, Deque, Dict, List, Optional, Set
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
@@ -20,29 +25,48 @@ from .cluster_connector import REPLAY_PRESETS, ClusterTelemetryConnector
 from .config import (
     APP_METADATA,
     FRONTEND_DIST_DIR,
+    GEMINI_API_KEY,
     GEMINI_MODEL,
     AUTH_COOKIE_NAME,
 )
 from .auth_dependencies import get_current_user, require_roles
-from .auth_service import get_session_user
+from .auth_service import get_session_user, record_auth_event
+from .email_service import EmailDeliveryError, send_transactional_email
+from .evaluation_service import compute_model_comparison_summary
 from .database import (
     add_system_log,
+    append_gemini_message,
+    auto_resolve_stale_offline_prometheus_episodes,
+    backup_database_to_file,
     clear_all_runtime_records,
+    create_experiment,
+    delete_experiment,
+    get_ai_report,
     get_app_settings,
     get_roi_totals,
-    get_ai_report,
-    list_ai_reports,
-    save_ai_report,
-    update_ai_report,
     init_db,
+    list_ai_reports,
+    list_auth_audit_logs,
+    list_auth_invitations,
+    list_auth_users,
     list_episodes,
+    list_experiments,
+    list_gemini_messages,
+    list_model_observations,
     list_slurm_audit,
     list_system_logs,
+    list_terminal_audit,
     query_telemetry_history,
+    record_model_observation,
     record_slurm_action,
     record_telemetry_batch,
+    record_terminal_audit,
+    save_ai_report,
+    update_ai_report,
     update_app_settings,
+    update_auth_user,
     update_episode_status,
+    update_experiment,
 )
 from .feature_pipeline import RollingFeaturePipeline
 from .logs_diagnostics import (
@@ -53,8 +77,8 @@ from .logs_diagnostics import (
     format_log_entries_as_text,
     retrieve_node_logs,
 )
-from .ml_engine import ModelEngine
 from .lstm_v8_service import LSTMV8Service
+from .v7_service import V7Service
 from .prometheus_service import (
     RANGE_CONFIG,
     check_prometheus_health,
@@ -62,29 +86,30 @@ from .prometheus_service import (
 )
 from .gemini_service import (
     PROMPT_VERSION,
+    GeminiConfigurationError,
+    GeminiGenerationError,
+    generate_ai_interaction,
     generate_ai_report,
+    test_gemini_connection,
 )
 from .reports_service import build_report_data, export_report_csv, export_report_pdf
-from .slurm_service import execute_slurm_cancel_job, sanitize_reason
+from .slurm_service import execute_slurm_cancel_job, node_id_aliases, sanitize_reason
 from .ssh_bridge import get_ssh_public_status, validate_safe_identifier
 from .terminal_service import TERMINAL_PRESET_GROUPS, execute_instance_terminal_command
 logger = logging.getLogger(__name__)
 
-# Prometheus Exporter Metrics (for native Grafana scraping alongside React)
-PROM_FAILURE_PROB = Gauge(
-    "hpc_aiops_failure_prob_1h",
-    "Predicted probability of node failure within 1 hour (0-1)",
+_DASH_TO_MODEL_NODE = {
+    "head-node": "headnode",
+    "compute-01": "compute001",
+    "compute-02": "compute002",
+    "compute-03": "compute003",
+}
+
+# Prometheus Exporter Metrics (real operational metrics only; no fabricated scores)
+PROM_NODE_UP = Gauge(
+    "hpc_aiops_node_up",
+    "Exporter availability per node (1=online, 0=offline)",
     ["node_id", "rack_id"],
-)
-PROM_ANOMALY_SCORE = Gauge(
-    "hpc_aiops_anomaly_score",
-    "Normalized ensemble unsupervised anomaly score (0-1)",
-    ["node_id", "rack_id"],
-)
-PROM_CONSENSUS_VOTES = Gauge(
-    "hpc_aiops_consensus_votes",
-    "Number of unsupervised models flagging anomaly (0-4)",
-    ["node_id"],
 )
 PROM_ALERT_PRIORITY = Gauge(
     "hpc_aiops_alert_priority_level",
@@ -96,9 +121,9 @@ PROM_STRAGGLER_SCORE = Gauge(
     "Cross-node MPI straggler asymmetry index (0-1)",
     ["node_id"],
 )
-PROM_CLUSTER_HEALTH = Gauge(
-    "hpc_aiops_cluster_health_score",
-    "Overall HPC cluster health score (0-100)",
+PROM_CLUSTER_NODES_ONLINE = Gauge(
+    "hpc_aiops_cluster_nodes_online",
+    "Number of online cluster nodes",
 )
 
 
@@ -136,6 +161,55 @@ class FaultClearRequest(BaseModel):
 
 class AlertActionRequest(BaseModel):
     action: str  # acknowledge | silence | resolve
+    note: Optional[str] = None
+
+
+class ExperimentCreateRequest(BaseModel):
+    name: str
+    category: str = "failure_injection"
+    node_id: str = "cluster"
+    fault_type: str = "unspecified"
+    label: str = "positive_fault"
+    start_utc: str
+    end_utc: Optional[str] = None
+    workload_condition: str = "mixed"
+    notes: str = ""
+
+
+class ExperimentUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    node_id: Optional[str] = None
+    fault_type: Optional[str] = None
+    label: Optional[str] = None
+    start_utc: Optional[str] = None
+    end_utc: Optional[str] = None
+    workload_condition: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class AIChatRequest(BaseModel):
+    question: str
+    session_id: str = "default"
+    range_minutes: int = Field(default=60, ge=5, le=10080)
+
+
+class AIInvestigateRequest(BaseModel):
+    episode_id: Optional[int] = None
+    node_id: Optional[str] = None
+    question: str = "Investigate the detected anomaly or incident and summarize next checks."
+    session_id: str = "default"
+
+
+class AIAnalyticsQueryRequest(BaseModel):
+    question: str
+    range_key: str = "24h"
+    session_id: str = "default"
+
+
+class UserUpdateRequest(BaseModel):
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class ZipLogsRequest(BaseModel):
@@ -153,12 +227,21 @@ class SettingsUpdateRequest(BaseModel):
     ssh_host: Optional[str] = None
     ssh_user: Optional[str] = None
     ssh_port: Optional[int] = None
+    v7_enabled: Optional[bool] = None
+    lstm_v8_enabled: Optional[bool] = None
+    restricted_terminal_enabled: Optional[bool] = None
+    email_alerts_enabled: Optional[bool] = None
+    alert_recipient_emails: Optional[str] = None
     alert_policy: Optional[Dict[str, Any]] = None
     node_overrides: Optional[Dict[str, Any]] = None
 
 
 class PrometheusTestRequest(BaseModel):
     prometheus_url: str
+
+
+class ModelToggleRequest(BaseModel):
+    enabled: bool
 
 
 class TerminalExecRequest(BaseModel):
@@ -172,7 +255,7 @@ class PipelineOrchestrator:
     def __init__(self) -> None:
         self.connector = ClusterTelemetryConnector()
         self.features = RollingFeaturePipeline(maxlen=96)
-        self.ml_engine = ModelEngine()
+        self.v7 = V7Service(poll_interval_sec=5.0)
         self.lstm_v8 = LSTMV8Service(poll_interval_sec=5.0)
         self.alerts = SmartAlertEngine()
 
@@ -183,7 +266,27 @@ class PipelineOrchestrator:
 
         self.stream_interval_sec: float = 3.0
         self.paused: bool = False
+        self.polling_active: bool = False
         self._tick_counter: int = 0
+        self._last_online_utc: Dict[str, datetime] = {}
+        self._last_online_iso: Dict[str, str] = {}
+        self._notified_episode_ids: Set[int] = set()
+
+    def sync_model_flags_from_settings(self) -> Dict[str, bool]:
+        try:
+            settings_cur = get_app_settings()
+            v7_enabled = bool(settings_cur.get("v7_enabled", True))
+            lstm_enabled = bool(settings_cur.get("lstm_v8_enabled", True))
+        except Exception:
+            v7_enabled = self.v7.enabled
+            lstm_enabled = self.lstm_v8.enabled
+        self.v7.enabled = v7_enabled
+        self.lstm_v8.enabled = lstm_enabled
+        if not v7_enabled:
+            self.v7.connected = False
+        if not lstm_enabled:
+            self.lstm_v8.connected = False
+        return {"v7_enabled": v7_enabled, "lstm_v8_enabled": lstm_enabled}
 
     def sync_interval_from_settings(self) -> None:
         try:
@@ -193,11 +296,33 @@ class PipelineOrchestrator:
         except Exception:
             logger.exception("Could not synchronize dashboard refresh interval.")
 
+    def get_models_status(self) -> Dict[str, Any]:
+        self.sync_model_flags_from_settings()
+        v7_status = self.v7.get_status()
+        lstm_status = self.lstm_v8.get_status()
+        return {
+            "legacy_model_engine_removed": True,
+            "v7_isolation_forest": v7_status,
+            "lstm_v8": {
+                "name": "LSTM V8 Temporal Forecaster",
+                **lstm_status,
+            },
+        }
+
     def step_once(self) -> Dict[str, Any]:
         self._tick_counter += 1
+        now_dt = datetime.now(timezone.utc)
+        settings_cur = get_app_settings()
+        flags = self.sync_model_flags_from_settings()
+        v7_enabled = flags["v7_enabled"]
+        lstm_enabled = flags["lstm_v8_enabled"]
+        v7_status = self.v7.get_status()
+        lstm_status = self.lstm_v8.get_status()
+        lstm_nodes = (lstm_status.get("state") or {}).get("nodes") or {}
 
         batch = self.connector.fetch_next_batch()
         ts = batch["timestamp_utc"]
+        auto_resolve_stale_offline_prometheus_episodes(ts)
         enriched_map = self.features.ingest_batch(batch["nodes"])
 
         scored_nodes: List[Dict[str, Any]] = []
@@ -213,49 +338,96 @@ class PipelineOrchestrator:
         for raw_node in batch["nodes"]:
             nid = raw_node["node_id"]
             ef = enriched_map[nid]
+            up_val = int(ef.get("up", 1) if ef.get("up") is not None else 0)
+            if up_val == 1:
+                self._last_online_utc[nid] = now_dt
+                self._last_online_iso[nid] = ts
+                age_sec = 0.0
+            else:
+                prev_dt = self._last_online_utc.get(nid)
+                age_sec = (now_dt - prev_dt).total_seconds() if prev_dt else None
 
-            ml_out = self.ml_engine.score_node(ef)
+            model_nid = _DASH_TO_MODEL_NODE.get(nid, nid)
+
+            # V7 Isolation Forest node payload (cached historical view kept if disabled)
+            v7_cached = self.v7.get_node_score(nid)
+            if v7_enabled:
+                v7_node_data = {
+                    "enabled": True,
+                    "status": v7_status["status"],
+                    "stale": v7_status["stale"],
+                    "last_success_utc": v7_status["last_success_utc"],
+                    "anomaly_score": None,
+                    "threshold": None,
+                    "is_anomaly": False,
+                    "classification": None,
+                    **(v7_cached or {}),
+                }
+                v7_alert_input = (
+                    v7_cached
+                    if (v7_cached and v7_status["connected"] and not v7_status["stale"])
+                    else None
+                )
+            else:
+                v7_node_data = {
+                    **(v7_cached or {}),
+                    "enabled": False,
+                    "status": "disabled",
+                    "stale": bool(v7_cached),
+                    "last_success_utc": v7_status["last_success_utc"],
+                    "is_anomaly": (v7_cached or {}).get("is_anomaly") if v7_cached else False,
+                }
+                v7_alert_input = None
+
+            # LSTM V8 node payload (cached historical view kept if disabled)
+            lstm_raw_node = lstm_nodes.get(model_nid)
+            if isinstance(lstm_raw_node, dict):
+                lstm_node_data = {
+                    **lstm_raw_node,
+                    "enabled": lstm_enabled,
+                    "status": lstm_status["status"] if lstm_enabled else "disabled",
+                    "stale": True if not lstm_enabled else lstm_status["stale"],
+                    "last_success_utc": lstm_status["last_success_utc"],
+                }
+            else:
+                lstm_node_data = None
+            lstm_warning = (
+                (lstm_raw_node or {}).get("latest_warning")
+                if isinstance(lstm_raw_node, dict)
+                else None
+            )
+            lstm_alert_input = (
+                lstm_warning
+                if (lstm_enabled and lstm_status["connected"] and not lstm_status["stale"])
+                else None
+            )
 
             alert_out = self.alerts.evaluate(
                 node_sample=ef,
-                ml_result=ml_out,
                 timestamp_utc=ts,
                 data_mode=self.connector.mode,
+                v7_result=v7_alert_input,
+                lstm_result=lstm_alert_input,
+                telemetry_age_seconds=age_sec,
             )
 
             merged = {
                 **ef,
-                **ml_out,
                 **alert_out,
+                "telemetry_age_seconds": round(age_sec, 1) if age_sec is not None else None,
+                "last_telemetry_utc": self._last_online_iso.get(nid),
+                "v7_detection": v7_node_data,
+                "lstm_v8_status": lstm_node_data,
             }
 
             scored_nodes.append(merged)
 
             rack = str(merged.get("rack_id", "rack-1"))
-
-            PROM_FAILURE_PROB.labels(
-                node_id=nid,
-                rack_id=rack,
-            ).set(ml_out["failure_prob_1h"])
-
-            PROM_ANOMALY_SCORE.labels(
-                node_id=nid,
-                rack_id=rack,
-            ).set(ml_out["anomaly_score"])
-
-            PROM_CONSENSUS_VOTES.labels(
-                node_id=nid,
-            ).set(ml_out["consensus_count"])
-
-            PROM_ALERT_PRIORITY.labels(
-                node_id=nid,
-            ).set(
+            PROM_NODE_UP.labels(node_id=nid, rack_id=rack).set(up_val)
+            PROM_ALERT_PRIORITY.labels(node_id=nid).set(
                 prio_to_num.get(alert_out["alert_priority"], 0)
             )
-
-            PROM_STRAGGLER_SCORE.labels(
-                node_id=nid,
-            ).set(
+            PROM_STRAGGLER_SCORE.labels(node_id=nid).set(
                 float(merged.get("mpi_straggler_score", 0.0))
             )
 
@@ -269,16 +441,6 @@ class PipelineOrchestrator:
                     "time": short_time,
                     "timestamp_utc": ts,
                     "up": merged.get("up", 1),
-                    "health_score": merged.get("node_health_score"),
-                    "failure_prob_pct": round(
-                        ml_out["failure_prob_1h"] * 100.0, 2
-                    ),
-                    "failure_prob_6h_pct": round(
-                        ml_out["failure_prob_6h"] * 100.0, 2
-                    ),
-                    "anomaly_score_pct": round(
-                        ml_out["anomaly_score"] * 100.0, 2
-                    ),
                     "cpu": merged.get("cpu_utilization_percent"),
                     "iowait": merged.get("cpu_iowait_percent"),
                     "memory": merged.get("memory_used_percent"),
@@ -286,43 +448,26 @@ class PipelineOrchestrator:
                     "load1": merged.get("load1"),
                     "load5": merged.get("load5"),
                     "norm_load": merged.get("normalized_load1"),
-                    "temp": merged.get("cpu_temperature_celsius"),
                     "root_fs": merged.get("root_used_percent"),
                     "scratch": merged.get("scratch_used_percent"),
                     "disk_read_mb": (
-                        round(
-                            float(merged["disk_read_bytes_per_second"])
-                            / (1024 * 1024),
-                            2,
-                        )
+                        round(float(merged["disk_read_bytes_per_second"]) / (1024 * 1024), 2)
                         if merged.get("disk_read_bytes_per_second") is not None
                         else None
                     ),
                     "disk_write_mb": (
-                        round(
-                            float(merged["disk_write_bytes_per_second"])
-                            / (1024 * 1024),
-                            2,
-                        )
+                        round(float(merged["disk_write_bytes_per_second"]) / (1024 * 1024), 2)
                         if merged.get("disk_write_bytes_per_second") is not None
                         else None
                     ),
                     "disk_io": merged.get("disk_io_utilization_percent"),
                     "net_rx_mb": (
-                        round(
-                            float(merged["network_receive_bytes_per_second"])
-                            / (1024 * 1024),
-                            2,
-                        )
+                        round(float(merged["network_receive_bytes_per_second"]) / (1024 * 1024), 2)
                         if merged.get("network_receive_bytes_per_second") is not None
                         else None
                     ),
                     "net_tx_mb": (
-                        round(
-                            float(merged["network_transmit_bytes_per_second"])
-                            / (1024 * 1024),
-                            2,
-                        )
+                        round(float(merged["network_transmit_bytes_per_second"]) / (1024 * 1024), 2)
                         if merged.get("network_transmit_bytes_per_second") is not None
                         else None
                     ),
@@ -331,8 +476,7 @@ class PipelineOrchestrator:
                     "psi_mem": merged.get("psi_memory_percent"),
                     "psi_io": merged.get("psi_io_percent"),
                     "straggler_pct": round(
-                        float(merged.get("mpi_straggler_score", 0.0))
-                        * 100.0,
+                        float(merged.get("mpi_straggler_score", 0.0)) * 100.0,
                         1,
                     ),
                 }
@@ -349,12 +493,82 @@ class PipelineOrchestrator:
             except Exception:
                 logger.exception("Could not persist telemetry batch.")
 
+        # Persist active V7 & LSTM V8 observations (deduped by model, node, timestamp).
+        try:
+            for sn in scored_nodes:
+                nid = sn["node_id"]
+                v7_d = sn.get("v7_detection") or {}
+                if (
+                    v7_d.get("enabled")
+                    and not v7_d.get("stale")
+                    and v7_d.get("anomaly_score") is not None
+                ):
+                    record_model_observation(
+                        model_name="v7",
+                        node_id=nid,
+                        observation_utc=str(v7_d.get("timestamp_utc") or ts),
+                        score=v7_d.get("anomaly_score"),
+                        threshold=v7_d.get("threshold"),
+                        flagged=bool(v7_d.get("is_anomaly")),
+                        classification=v7_d.get("classification"),
+                        details={"model_version": v7_d.get("model_version")},
+                    )
+                lstm_d = sn.get("lstm_v8_status") or {}
+                lw = lstm_d.get("latest_warning") or {}
+                if (
+                    lstm_d.get("enabled")
+                    and not lstm_d.get("stale")
+                    and isinstance(lw, dict)
+                    and lw.get("warning_score") is not None
+                ):
+                    record_model_observation(
+                        model_name="lstm_v8",
+                        node_id=nid,
+                        observation_utc=str(lw.get("evaluated_at_timestamp_utc") or ts),
+                        score=lw.get("warning_score"),
+                        threshold=lw.get("warning_threshold"),
+                        flagged=bool(lw.get("is_warning")),
+                        classification=lw.get("status"),
+                        details=lw.get("components") or {},
+                    )
+        except Exception:
+            logger.exception("Could not persist model score observations.")
+
         episodes = list_episodes(limit=60)
 
         active_eps = [
             e for e in episodes
             if e["status"] in ("active", "acknowledged")
         ]
+
+        # Optional email alert notification for newly opened active P1 episodes
+        if settings_cur.get("email_alerts_enabled") and settings_cur.get("alert_recipient_emails"):
+            recipients = [
+                r.strip()
+                for r in str(settings_cur.get("alert_recipient_emails", "")).split(",")
+                if "@" in r
+            ]
+            if recipients:
+                for ep in active_eps:
+                    ep_id = int(ep["id"])
+                    if ep["priority"] == "P1" and ep_id not in self._notified_episode_ids:
+                        self._notified_episode_ids.add(ep_id)
+                        for rec in recipients[:5]:
+                            try:
+                                send_transactional_email(
+                                    to_email=rec,
+                                    subject=f"[HPC AIOps {ep['priority']}] {ep['title']}",
+                                    html_content=(
+                                        f"<h3>{ep['title']}</h3>"
+                                        f"<p><strong>Node:</strong> {ep['node_id']} | "
+                                        f"<strong>Source:</strong> {ep.get('alert_source')}</p>"
+                                        f"<p>{ep.get('summary')}</p>"
+                                        f"<p><strong>Recommended checks:</strong> {ep.get('recommended_checks')}</p>"
+                                    ),
+                                    text_content=f"{ep['title']} | Node: {ep['node_id']} | {ep.get('summary')}",
+                                )
+                            except Exception:
+                                logger.warning("Optional incident email dispatch failed for episode %s", ep_id)
 
         # Aggregate cluster-wide KPIs.
         online_nodes = [
@@ -374,12 +588,6 @@ class PipelineOrchestrator:
             if n.get("memory_used_percent") is not None
         ]
 
-        health_vals = [
-            float(n["node_health_score"])
-            for n in scored_nodes
-            if n.get("node_health_score") is not None
-        ]
-
         cluster_cpu = (
             round(statistics.fmean(cpu_vals), 1)
             if cpu_vals else None
@@ -390,57 +598,46 @@ class PipelineOrchestrator:
             if mem_vals else None
         )
 
-        avail_ratio = len(online_nodes) / max(len(scored_nodes), 1)
+        PROM_CLUSTER_NODES_ONLINE.set(len(online_nodes))
 
-        raw_health = (
-            statistics.fmean(health_vals) * avail_ratio
-            if health_vals else 0.0
+        nodes_offline = sum(1 for n in scored_nodes if n.get("health_status") == "offline")
+        nodes_critical = sum(1 for n in scored_nodes if n.get("health_status") == "critical")
+        nodes_warning = sum(1 for n in scored_nodes if n.get("health_status") == "warning")
+        nodes_stale = sum(1 for n in scored_nodes if n.get("health_status") == "stale")
+        nodes_maintenance = sum(1 for n in scored_nodes if n.get("health_status") == "maintenance")
+        nodes_v7_anom = sum(
+            1
+            for n in scored_nodes
+            if (n.get("v7_detection") or {}).get("enabled")
+            and not (n.get("v7_detection") or {}).get("stale")
+            and (n.get("v7_detection") or {}).get("is_anomaly")
         )
-
-        cluster_health_score = round(
-            max(0.0, min(100.0, raw_health)),
-            1,
+        nodes_lstm_warn = sum(
+            1
+            for n in scored_nodes
+            if (n.get("lstm_v8_status") or {}).get("enabled")
+            and not (n.get("lstm_v8_status") or {}).get("stale")
+            and ((n.get("lstm_v8_status") or {}).get("latest_warning") or {}).get("is_warning")
         )
-
-        PROM_CLUSTER_HEALTH.set(cluster_health_score)
 
         if len(online_nodes) == 0:
-            health_label = "Offline"
+            cluster_status = "offline"
+            cluster_status_label = "Offline"
+        elif nodes_offline > 0 or nodes_critical > 0 or any(e["priority"] == "P1" for e in active_eps):
+            cluster_status = "critical"
+            cluster_status_label = "Critical"
         elif (
-            cluster_health_score >= 92.0
-            and not any(e["priority"] == "P1" for e in active_eps)
+            nodes_warning > 0
+            or nodes_stale > 0
+            or any(e["priority"] == "P2" for e in active_eps)
+            or nodes_v7_anom > 0
+            or nodes_lstm_warn > 0
         ):
-            health_label = "Excellent"
-        elif cluster_health_score >= 78.0:
-            health_label = "Healthy"
-        elif cluster_health_score >= 55.0:
-            health_label = "Degraded"
+            cluster_status = "warning"
+            cluster_status_label = "Warning"
         else:
-            health_label = "Critical"
-
-        peak_risk_pct = round(
-            max(
-                (
-                    float(n["failure_prob_1h"])
-                    for n in scored_nodes
-                ),
-                default=0.0,
-            ) * 100.0,
-            2,
-        )
-
-        mean_anom_pct = (
-            round(
-                statistics.fmean(
-                    [
-                        float(n["anomaly_score"])
-                        for n in scored_nodes
-                    ]
-                ) * 100.0,
-                1,
-            )
-            if scored_nodes else 0.0
-        )
+            cluster_status = "healthy"
+            cluster_status_label = "Healthy"
 
         short_time = ts[11:16] if len(ts) >= 16 else ts
 
@@ -448,75 +645,86 @@ class PipelineOrchestrator:
             {
                 "time": short_time,
                 "timestamp_utc": ts,
-                "health_score": cluster_health_score,
                 "cpu_percent": cluster_cpu,
                 "memory_percent": cluster_mem,
-                "failure_risk_pct": peak_risk_pct,
-                "anomaly_pct": mean_anom_pct,
                 "nodes_online": len(online_nodes),
+                "active_alerts": len(active_eps),
             }
         )
 
-        # Enrich Slurm jobs with blast-radius tags.
-        node_risk_lookup = {
-            n["node_id"]: n
-            for n in scored_nodes
-        }
-
+        # Enrich Slurm jobs with factual node health & active incident correlation.
+        node_lookup: Dict[str, Dict[str, Any]] = {}
+        for n in scored_nodes:
+            for key_src in (n.get("node_id", ""), n.get("hostname", "")):
+                for alias in node_id_aliases(str(key_src)):
+                    node_lookup.setdefault(alias, n)
         enriched_jobs = []
+        active_slurm_jobs = 0
+        pending_slurm_jobs = 0
+        failed_slurm_jobs = 0
 
         for job in batch.get("slurm_jobs", []):
             jc = dict(job)
+            st_upper = str(jc.get("state", "")).upper()
+            if st_upper == "RUNNING":
+                active_slurm_jobs += 1
+            elif st_upper == "PENDING":
+                pending_slurm_jobs += 1
+            elif st_upper in ("FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL"):
+                failed_slurm_jobs += 1
+
             job_nodes = jc.get("nodes", [])
-
-            max_p = max(
-                (
-                    float(node_risk_lookup[nid]["failure_prob_1h"])
-                    for nid in job_nodes
-                    if nid in node_risk_lookup
-                ),
-                default=0.0,
-            )
-
-            flagged = [
+            affected_nodes = [
                 nid
                 for nid in job_nodes
-                if nid in node_risk_lookup
-                and node_risk_lookup[nid]["alert_priority"] in ("P1", "P2")
+                if nid in node_lookup
+                and (
+                    node_lookup[nid].get("health_status") in ("critical", "warning", "offline", "stale")
+                    or node_lookup[nid].get("alert_priority") in ("P1", "P2")
+                    or (
+                        (node_lookup[nid].get("lstm_v8_status") or {}).get("enabled")
+                        and not (node_lookup[nid].get("lstm_v8_status") or {}).get("stale")
+                        and ((node_lookup[nid].get("lstm_v8_status") or {}).get("latest_warning") or {}).get("is_warning")
+                    )
+                    or (
+                        (node_lookup[nid].get("v7_detection") or {}).get("enabled")
+                        and not (node_lookup[nid].get("v7_detection") or {}).get("stale")
+                        and (node_lookup[nid].get("v7_detection") or {}).get("is_anomaly")
+                    )
+                )
             ]
-
-            jc["max_node_failure_prob"] = round(max_p, 4)
-            jc["at_risk_nodes"] = flagged
-
-            jc["blast_status"] = (
-                "CRITICAL_RISK"
-                if max_p >= 0.40
-                or any(
-                    node_risk_lookup.get(nid, {}).get("alert_priority") == "P1"
-                    for nid in job_nodes
-                )
-                else (
-                    "WARNING_RISK"
-                    if flagged
-                    else "HEALTHY"
-                )
+            has_critical = any(
+                node_lookup.get(nid, {}).get("health_status") in ("critical", "offline")
+                or node_lookup.get(nid, {}).get("alert_priority") == "P1"
+                for nid in job_nodes
             )
-
+            jc["at_risk_nodes"] = affected_nodes
+            jc["node_impact_status"] = (
+                "affected" if has_critical else ("degraded" if affected_nodes else "normal")
+            )
             enriched_jobs.append(jc)
 
-        settings_cur = get_app_settings()
+        models_status = self.get_models_status()
+        prom_connected = bool(batch.get("prometheus_connected", False))
+        prometheus_status = (
+            "connected"
+            if prom_connected
+            else ("simulated" if batch.get("is_simulated") else "offline")
+        )
 
-        # Include the latest cached LSTM V8 state.
         snapshot = {
             "timestamp_utc": ts,
             "mode": self.connector.mode,
-            "lstm_v8": self.lstm_v8.get_status(),
+            "v7": v7_status,
+            "lstm_v8": lstm_status,
             "mode_label": batch.get("mode_label", ""),
             "is_synthetic": bool(batch.get("is_synthetic", False)),
             "is_simulated": bool(batch.get("is_simulated", False)),
-            "prometheus_connected": bool(batch.get("prometheus_connected", False)),
+            "prometheus_connected": prom_connected,
             "slurm_connected": bool(batch.get("slurm_connected", False)),
             "slurm_source": batch.get("slurm_source", "unavailable"),
+            "slurm_error": batch.get("slurm_error"),
+            "slurm_nodes": batch.get("slurm_nodes", []),
             "preset_id": self.connector.replay_preset_id,
             "preset_description": batch.get("preset_description"),
             "replay_progress": batch.get("replay_progress"),
@@ -528,32 +736,39 @@ class PipelineOrchestrator:
                 "http://localhost:3000",
             ),
             "prometheus_url": self.connector.prometheus_url,
-            "model_status": self.ml_engine.get_status(),
+            "model_status": models_status,
             "ssh_status": get_ssh_public_status(),
-          
             "active_fault_injections": self.connector.injected_faults,
             "kpis": {
                 "nodes_total": len(scored_nodes),
                 "nodes_online": len(online_nodes),
+                "nodes_offline": nodes_offline,
+                "nodes_critical": nodes_critical,
+                "nodes_warning": nodes_warning,
+                "nodes_stale": nodes_stale,
+                "nodes_maintenance": nodes_maintenance,
                 "nodes_drained": sum(
                     1 for n in scored_nodes
                     if "DRAIN" in str(n.get("slurm_state", ""))
                 ),
-                "cluster_health_score": cluster_health_score,
-                "cluster_health_label": health_label,
+                "nodes_with_v7_anomaly": nodes_v7_anom,
+                "nodes_with_lstm_warning": nodes_lstm_warn,
+                "active_slurm_jobs": active_slurm_jobs,
+                "pending_slurm_jobs": pending_slurm_jobs,
+                "failed_slurm_jobs": failed_slurm_jobs,
+                "cluster_status": cluster_status,
+                "cluster_status_label": cluster_status_label,
                 "cluster_cpu_percent": cluster_cpu,
                 "cluster_memory_percent": cluster_mem,
                 "active_episodes_total": len(active_eps),
-                "p1_count": sum(
-                    1 for e in active_eps if e["priority"] == "P1"
-                ),
-                "p2_count": sum(
-                    1 for e in active_eps if e["priority"] == "P2"
-                ),
-                "p3_count": sum(
-                    1 for e in active_eps if e["priority"] == "P3"
-                ),
-                "peak_failure_prob_pct": peak_risk_pct,
+                "p1_count": sum(1 for e in active_eps if e["priority"] == "P1"),
+                "p2_count": sum(1 for e in active_eps if e["priority"] == "P2"),
+                "p3_count": sum(1 for e in active_eps if e["priority"] == "P3"),
+                "prometheus_status": prometheus_status,
+                "v7_api_status": models_status["v7_isolation_forest"]["status"],
+                "lstm_v8_api_status": models_status["lstm_v8"]["status"],
+                "gemini_status": "configured" if GEMINI_API_KEY else "not_configured",
+                "latest_telemetry_utc": ts,
                 "peak_straggler_pct": round(
                     max(
                         (
@@ -617,8 +832,12 @@ async def lifespan(_app: FastAPI):
         ),
     )
 
-    # Fetch the initial LSTM V8 state.
-    await orchestrator.lstm_v8.refresh_once()
+    # Synchronize model integration flags before initial poll.
+    orchestrator.sync_model_flags_from_settings()
+    if orchestrator.v7.enabled:
+        await orchestrator.v7.refresh_once()
+    if orchestrator.lstm_v8.enabled:
+        await orchestrator.lstm_v8.refresh_once()
 
     # Warm up the existing dashboard pipeline.
     warmup_ticks = (
@@ -630,8 +849,12 @@ async def lifespan(_app: FastAPI):
     for _ in range(warmup_ticks):
         orchestrator.step_once()
 
-    # Start independent LSTM V8 polling.
-    await orchestrator.lstm_v8.start()
+    # Start independent model polling only for enabled integrations.
+    orchestrator.polling_active = True
+    if orchestrator.v7.enabled:
+        await orchestrator.v7.start()
+    if orchestrator.lstm_v8.enabled:
+        await orchestrator.lstm_v8.start()
 
     stop_event = asyncio.Event()
 
@@ -665,6 +888,8 @@ async def lifespan(_app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+        orchestrator.polling_active = False
+        await orchestrator.v7.stop()
         await orchestrator.lstm_v8.stop()
 
 app = FastAPI(
@@ -685,7 +910,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# ---------------------------------------------------------------------------
+# Public Backend Health Check
+# ---------------------------------------------------------------------------
 
+@app.get("/api/health")
+def health_check() -> Dict[str, str]:
+    return {
+        "status": "healthy",
+        "service": "HPC AI Operations Dashboard API",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -729,26 +963,85 @@ async def force_state_refresh() -> Dict[str, Any]:
     dependencies=[Depends(require_authenticated_user)],
 )
 def get_models_status() -> Dict[str, Any]:
-    return orchestrator.ml_engine.get_status()
+    return orchestrator.get_models_status()
+
+
+@app.get(
+    "/api/models/v7/scores",
+    dependencies=[Depends(require_authenticated_user)],
+)
+def get_v7_scores() -> Dict[str, Any]:
+    orchestrator.sync_model_flags_from_settings()
+    return {
+        "status": orchestrator.v7.get_status(),
+        "history": orchestrator.v7.get_history(),
+    }
 
 
 @app.post(
-    "/api/models/reload",
+    "/api/models/v7/toggle",
     dependencies=[Depends(require_admin_role)],
 )
-async def reload_models() -> Dict[str, Any]:
-    status = orchestrator.ml_engine.reload_models()
-    add_system_log(
-        timestamp_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        node_id="head-node",
-        source="ml-adapter",
-        severity="INFO",
-        event_type="model_reload",
-        message=f"Reloaded backend/models/ -> {status['engine_label']} ({len(status['loaded_files'])} artifacts)",
+async def toggle_v7_integration(req: ModelToggleRequest) -> Dict[str, Any]:
+    saved = update_app_settings({"v7_enabled": bool(req.enabled)})
+    status = await orchestrator.v7.set_enabled(
+        bool(saved["v7_enabled"]),
+        start_poller=orchestrator.polling_active,
     )
     snap = orchestrator.step_once()
     await orchestrator.broadcast(snap)
-    return status
+    return {"saved": True, "v7_enabled": bool(saved["v7_enabled"]), "v7": status}
+
+
+@app.post(
+    "/api/models/v7/refresh",
+    dependencies=[Depends(require_admin_role)],
+)
+async def refresh_v7_scores() -> Dict[str, Any]:
+    orchestrator.sync_model_flags_from_settings()
+    await orchestrator.v7.refresh_once()
+    snap = orchestrator.step_once()
+    await orchestrator.broadcast(snap)
+    return orchestrator.v7.get_status()
+
+
+@app.get(
+    "/api/models/lstm-v8/state",
+    dependencies=[Depends(require_authenticated_user)],
+)
+def get_lstm_v8_details() -> Dict[str, Any]:
+    orchestrator.sync_model_flags_from_settings()
+    return {
+        "status": orchestrator.lstm_v8.get_status(),
+        "history": orchestrator.lstm_v8.get_history(),
+    }
+
+
+@app.post(
+    "/api/models/lstm-v8/toggle",
+    dependencies=[Depends(require_admin_role)],
+)
+async def toggle_lstm_v8_integration(req: ModelToggleRequest) -> Dict[str, Any]:
+    saved = update_app_settings({"lstm_v8_enabled": bool(req.enabled)})
+    status = await orchestrator.lstm_v8.set_enabled(
+        bool(saved["lstm_v8_enabled"]),
+        start_poller=orchestrator.polling_active,
+    )
+    snap = orchestrator.step_once()
+    await orchestrator.broadcast(snap)
+    return {"saved": True, "lstm_v8_enabled": bool(saved["lstm_v8_enabled"]), "lstm_v8": status}
+
+
+@app.post(
+    "/api/models/lstm-v8/refresh",
+    dependencies=[Depends(require_admin_role)],
+)
+async def refresh_lstm_v8_state() -> Dict[str, Any]:
+    orchestrator.sync_model_flags_from_settings()
+    await orchestrator.lstm_v8.refresh_once()
+    snap = orchestrator.step_once()
+    await orchestrator.broadcast(snap)
+    return orchestrator.lstm_v8.get_status()
 
 
 @app.post(
@@ -837,7 +1130,6 @@ def get_monitoring_range_history(
                     "timestamp_utc": r["timestamp_utc"],
                     "time": r["timestamp_utc"][11:19] if len(r["timestamp_utc"]) >= 19 else r["timestamp_utc"],
                     "up": r["up"],
-                    "health_score": r["health_score"],
                     "cpu": r["cpu_percent"],
                     "iowait": r["iowait_percent"],
                     "memory": r["memory_percent"],
@@ -851,9 +1143,6 @@ def get_monitoring_range_history(
                     "net_rx_mb": r["net_rx_mb"],
                     "net_tx_mb": r["net_tx_mb"],
                     "net_err": r["net_err_s"],
-                    "temp": r["temp_celsius"],
-                    "failure_prob_pct": round(float(r["failure_prob_1h"]) * 100.0, 2) if r["failure_prob_1h"] is not None else None,
-                    "anomaly_score_pct": round(float(r["anomaly_score"]) * 100.0, 2) if r["anomaly_score"] is not None else None,
                 }
                 for r in db_rows
             ]
@@ -866,20 +1155,16 @@ def get_monitoring_range_history(
                 grp = by_ts[ts_k]
                 cpus = [float(x["cpu_percent"]) for x in grp if x["cpu_percent"] is not None]
                 mems = [float(x["memory_percent"]) for x in grp if x["memory_percent"] is not None]
-                hlths = [float(x["health_score"]) for x in grp if x["health_score"] is not None]
                 dws = [float(x["disk_write_mb"]) for x in grp if x["disk_write_mb"] is not None]
                 nrxs = [float(x["net_rx_mb"]) for x in grp if x["net_rx_mb"] is not None]
-                risks = [float(x["failure_prob_1h"]) * 100.0 for x in grp if x["failure_prob_1h"] is not None]
                 mapped.append(
                     {
                         "timestamp_utc": ts_k,
                         "time": ts_k[11:19] if len(ts_k) >= 19 else ts_k,
-                        "health_score": round(statistics.fmean(hlths), 1) if hlths else None,
                         "cpu": round(statistics.fmean(cpus), 2) if cpus else None,
                         "memory": round(statistics.fmean(mems), 2) if mems else None,
                         "disk_write_mb": round(sum(dws), 2) if dws else None,
                         "net_rx_mb": round(sum(nrxs), 2) if nrxs else None,
-                        "failure_prob_pct": round(max(risks), 2) if risks else 0.0,
                     }
                 )
         return {
@@ -947,6 +1232,7 @@ async def slurm_cancel_job_endpoint(req: JobCancelRequest) -> Dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     orchestrator.connector.cancelled_sim_jobs.add(req.job_id)
+    orchestrator.connector.invalidate_slurm_cache()
     record_slurm_action(
         node_id=f"job-{req.job_id}",
         action="CANCEL_JOB",
@@ -973,11 +1259,20 @@ def get_slurm_audit_history() -> Dict[str, Any]:
 # Node Logs & Secure Diagnostic Bundles
 # ---------------------------------------------------------------------------
 
+def _find_node_in_snapshot(snap: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
+    aliases = set(node_id_aliases(node_id))
+    for n in snap.get("nodes", []):
+        cand = str(n.get("node_id", ""))
+        if cand == node_id or aliases.intersection(node_id_aliases(cand)):
+            return n
+    return None
+
+
 def _resolve_node_target(node_id: str) -> Dict[str, Any]:
     snap = orchestrator.latest_snapshot or orchestrator.step_once()
-    for n in snap.get("nodes", []):
-        if n["node_id"] == node_id:
-            return n
+    found = _find_node_in_snapshot(snap, node_id)
+    if found:
+        return found
     return {"node_id": node_id, "ip": "localhost", "ssh_target": "localhost"}
 
 
@@ -1068,7 +1363,7 @@ def download_node_diagnostic_bundle(node_id: str) -> Response:
     if not validate_safe_identifier(node_id):
         raise HTTPException(status_code=400, detail="Invalid node identifier")
     snap = orchestrator.latest_snapshot or orchestrator.step_once()
-    node = next((n for n in snap.get("nodes", []) if n["node_id"] == node_id), None)
+    node = _find_node_in_snapshot(snap, node_id)
     if not node:
         raise HTTPException(status_code=404, detail="Node not found in cluster")
     record_slurm_action(
@@ -1080,7 +1375,7 @@ def download_node_diagnostic_bundle(node_id: str) -> Response:
         kwh_saved=0.0,
         executed_mode="diagnostics_api",
     )
-    zip_bytes = build_node_diagnostic_bundle_zip(node, orchestrator.ml_engine.get_status())
+    zip_bytes = build_node_diagnostic_bundle_zip(node, orchestrator.get_models_status())
     ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     fname = f"{node_id}_diagnostic_bundle_{ts_slug}.zip"
     return Response(
@@ -1121,23 +1416,50 @@ def download_cluster_diagnostic_bundle() -> Response:
     dependencies=[Depends(require_authenticated_user)],
 )
 def get_terminal_presets() -> Dict[str, Any]:
+    settings_cur = get_app_settings()
     return {
+        "enabled": bool(settings_cur.get("restricted_terminal_enabled", False)),
         "preset_groups": TERMINAL_PRESET_GROUPS,
         "ssh_status": get_ssh_public_status(),
     }
 
 
-@app.post("/api/terminal/exec", dependencies=[Depends(require_admin_role)])
-def execute_terminal_command_endpoint(req: TerminalExecRequest) -> Dict[str, Any]:
+@app.get(
+    "/api/terminal/audit",
+    dependencies=[Depends(require_admin_role)],
+)
+def get_terminal_audit_endpoint(limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
+    return {"entries": list_terminal_audit(limit=limit)}
+
+
+@app.post("/api/terminal/exec")
+def execute_terminal_command_endpoint(
+    req: TerminalExecRequest,
+    current_user: Dict[str, Any] = Depends(require_admin_role),
+) -> Dict[str, Any]:
+    settings_cur = get_app_settings()
+    if not settings_cur.get("restricted_terminal_enabled", False):
+        record_terminal_audit(
+            user_email=current_user.get("email", ""),
+            node_id=req.node_id,
+            command=req.command,
+            allowed=False,
+            blocked_reason="Operations terminal is disabled in System Settings.",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Operations Terminal is currently disabled in System Settings.",
+        )
+
     if not validate_safe_identifier(req.node_id):
         raise HTTPException(status_code=400, detail="Invalid node identifier")
     snap = orchestrator.latest_snapshot or orchestrator.step_once()
     nodes = snap.get("nodes", [])
-    target_node = next((n for n in nodes if n["node_id"] == req.node_id), None)
+    target_node = _find_node_in_snapshot(snap, req.node_id)
     if not target_node:
         raise HTTPException(status_code=404, detail=f"Instance '{req.node_id}' not found in cluster")
     try:
-        return execute_instance_terminal_command(
+        res = execute_instance_terminal_command(
             node=target_node,
             all_nodes=nodes,
             slurm_jobs=snap.get("slurm_jobs", []),
@@ -1145,7 +1467,23 @@ def execute_terminal_command_endpoint(req: TerminalExecRequest) -> Dict[str, Any
             raw_command=req.command,
             confirmed=req.confirmed,
         )
+        record_terminal_audit(
+            user_email=current_user.get("email", ""),
+            node_id=req.node_id,
+            command=req.command,
+            allowed=True,
+            exit_code=int(res.get("exit_code", 0)),
+            output_preview=str(res.get("output", res.get("stdout", ""))),
+        )
+        return res
     except ValueError as exc:
+        record_terminal_audit(
+            user_email=current_user.get("email", ""),
+            node_id=req.node_id,
+            command=req.command,
+            allowed=False,
+            blocked_reason=str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc))
 
 
@@ -1195,7 +1533,8 @@ def get_performance_analytics_summary(range_key: str = Query("1h")) -> Dict[str,
                 "avg_iowait": avg_io,
                 "avg_disk_write_mb": avg_dw,
                 "avg_net_rx_mb": avg_nrx,
-                "health_score": n.get("node_health_score", 100.0),
+                "health_status": n.get("health_status", "healthy"),
+                "health_classification": n.get("health_classification", "Healthy"),
             }
         )
 
@@ -1263,6 +1602,7 @@ def generate_ai_report_endpoint(
         "alerts_incidents",
         "slurm_workload",
         "performance_history",
+        "experiment_evaluation",
     }
 
     if req.report_type not in allowed_types:
@@ -1370,7 +1710,10 @@ def get_ai_report_status(
     }
 
 
-@app.get("/api/reports/ai/{report_id}")
+@app.get(
+    "/api/reports/ai/{report_id}",
+    dependencies=[Depends(require_authenticated_user)],
+)
 def get_ai_report_details(
     report_id: int,
 ) -> Dict[str, Any]:
@@ -1483,13 +1826,34 @@ async def clear_demo_fault(req: FaultClearRequest) -> Dict[str, Any]:
     return {"cleared": True}
 
 
-@app.post(
-    "/api/alerts/{episode_id}/action",
-    dependencies=[Depends(require_admin_role)],
+@app.get(
+    "/api/alerts",
+    dependencies=[Depends(require_authenticated_user)],
 )
+def list_filtered_alerts(
+    status: Optional[str] = Query(None),
+    node_id: Optional[str] = Query(None),
+    alert_source: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> Dict[str, Any]:
+    items = list_episodes(limit=limit)
+    if status:
+        items = [e for e in items if e.get("status") == status]
+    if node_id:
+        items = [e for e in items if e.get("node_id") == node_id]
+    if alert_source:
+        items = [e for e in items if e.get("alert_source") == alert_source]
+    if priority:
+        items = [e for e in items if e.get("priority") == priority]
+    return {"episodes": items, "total": len(items)}
+
+
+@app.post("/api/alerts/{episode_id}/action")
 async def alert_triage_action(
     episode_id: int,
     req: AlertActionRequest,
+    current_user: Dict[str, Any] = Depends(require_admin_role),
 ) -> Dict[str, Any]:
     if req.action not in ("acknowledge", "silence", "resolve"):
         raise HTTPException(status_code=400, detail="Unsupported alert action")
@@ -1498,7 +1862,13 @@ async def alert_triage_action(
         silenced_until = (
             datetime.now(timezone.utc) + timedelta(minutes=30)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    updated = update_episode_status(episode_id, req.action, silenced_until)
+    updated = update_episode_status(
+        episode_id=episode_id,
+        action=req.action,
+        silenced_until_utc=silenced_until,
+        acknowledged_by=current_user.get("email"),
+        resolution_note=req.note,
+    )
     if not updated:
         raise HTTPException(status_code=404, detail="Episode not found")
     if orchestrator.latest_snapshot:
@@ -1529,7 +1899,11 @@ def get_settings_endpoint() -> Dict[str, Any]:
             "ssh_bridge": get_ssh_public_status(),
             "slurm_connected": orchestrator.connector.slurm_connected,
             "slurm_source": orchestrator.connector.slurm_source,
-            "ml_engine": orchestrator.ml_engine.get_status(),
+            "models": orchestrator.get_models_status(),
+            "gemini": {
+                "configured": bool(GEMINI_API_KEY),
+                "model": GEMINI_MODEL,
+            },
         },
     }
 
@@ -1540,6 +1914,16 @@ async def update_settings_endpoint(req: SettingsUpdateRequest) -> Dict[str, Any]
     saved = update_app_settings(updates)
     orchestrator.sync_interval_from_settings()
     orchestrator.connector.sync_from_settings()
+    if "v7_enabled" in updates:
+        await orchestrator.v7.set_enabled(
+            bool(saved["v7_enabled"]),
+            start_poller=orchestrator.polling_active,
+        )
+    if "lstm_v8_enabled" in updates:
+        await orchestrator.lstm_v8.set_enabled(
+            bool(saved["lstm_v8_enabled"]),
+            start_poller=orchestrator.polling_active,
+        )
     snap = orchestrator.step_once()
     await orchestrator.broadcast(snap)
     return {"saved": True, "settings": saved}
@@ -1551,6 +1935,420 @@ async def update_settings_endpoint(req: SettingsUpdateRequest) -> Dict[str, Any]
 )
 def test_prometheus_connection(req: PrometheusTestRequest) -> Dict[str, Any]:
     return check_prometheus_health(req.prometheus_url, timeout=2.5)
+
+
+
+@app.get(
+    "/api/monitoring/export",
+    dependencies=[Depends(require_authenticated_user)],
+)
+def export_telemetry_csv(
+    range_key: str = Query("1h"),
+    node_id: Optional[str] = Query(None),
+) -> Response:
+    minutes, _ = RANGE_CONFIG.get(range_key, (60, 30))
+    rows = query_telemetry_history(range_minutes=minutes, node_id=node_id, limit=2500)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "timestamp_utc", "data_mode", "node_id", "up",
+        "cpu_percent", "iowait_percent", "memory_percent", "swap_percent",
+        "load1", "normalized_load1", "scratch_percent",
+        "disk_read_mb", "disk_write_mb", "disk_io_percent",
+        "net_rx_mb", "net_tx_mb", "net_err_s",
+    ])
+    for r in rows:
+        writer.writerow([
+            r.get("timestamp_utc", ""),
+            r.get("data_mode", ""),
+            r.get("node_id", ""),
+            r.get("up", ""),
+            r.get("cpu_percent", ""),
+            r.get("iowait_percent", ""),
+            r.get("memory_percent", ""),
+            r.get("swap_percent", ""),
+            r.get("load1", ""),
+            r.get("normalized_load1", ""),
+            r.get("scratch_percent", ""),
+            r.get("disk_read_mb", ""),
+            r.get("disk_write_mb", ""),
+            r.get("disk_io_percent", ""),
+            r.get("net_rx_mb", ""),
+            r.get("net_tx_mb", ""),
+            r.get("net_err_s", ""),
+        ])
+    slug = f"{node_id or 'cluster'}_{range_key}"
+    return Response(
+        content=buf.getvalue().encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="telemetry_{slug}.csv"'},
+    )
+
+
+@app.get(
+    "/api/models/evaluation",
+    dependencies=[Depends(require_authenticated_user)],
+)
+def get_models_evaluation_comparison() -> Dict[str, Any]:
+    return compute_model_comparison_summary()
+
+
+@app.get(
+    "/api/experiments",
+    dependencies=[Depends(require_authenticated_user)],
+)
+def list_experiments_endpoint(category: Optional[str] = Query(None)) -> Dict[str, Any]:
+    return {
+        "experiments": list_experiments(category=category, limit=200),
+        "evaluation": compute_model_comparison_summary(),
+    }
+
+
+@app.post("/api/experiments")
+def create_experiment_endpoint(
+    req: ExperimentCreateRequest,
+    current_user: Dict[str, Any] = Depends(require_admin_role),
+) -> Dict[str, Any]:
+    if req.label not in ("positive_fault", "benign_workload", "normal"):
+        raise HTTPException(status_code=400, detail="Invalid experiment label")
+    exp_id = create_experiment(
+        name=req.name,
+        category=req.category,
+        node_id=req.node_id,
+        fault_type=req.fault_type,
+        label=req.label,
+        start_utc=req.start_utc,
+        end_utc=req.end_utc,
+        workload_condition=req.workload_condition,
+        notes=req.notes,
+        created_by=current_user.get("email", "admin"),
+    )
+    return {
+        "created": True,
+        "id": exp_id,
+        "evaluation": compute_model_comparison_summary(),
+    }
+
+
+@app.put(
+    "/api/experiments/{experiment_id}",
+    dependencies=[Depends(require_admin_role)],
+)
+def update_experiment_endpoint(
+    experiment_id: int,
+    req: ExperimentUpdateRequest,
+) -> Dict[str, Any]:
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    updated = update_experiment(experiment_id, updates)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return {"saved": True, "experiment": updated, "evaluation": compute_model_comparison_summary()}
+
+
+@app.delete(
+    "/api/experiments/{experiment_id}",
+    dependencies=[Depends(require_admin_role)],
+)
+def delete_experiment_endpoint(experiment_id: int) -> Dict[str, Any]:
+    ok = delete_experiment(experiment_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return {"deleted": True, "evaluation": compute_model_comparison_summary()}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: AI Intelligence Centre (Gemini LLM)
+# ---------------------------------------------------------------------------
+
+def _build_gemini_live_evidence(
+    snap: Dict[str, Any],
+    range_minutes: int = 60,
+    target_node_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    nodes = snap.get("nodes", [])
+    if target_node_id:
+        nodes = [n for n in nodes if n.get("node_id") == target_node_id] or nodes
+
+    compact_nodes = [
+        {
+            "node_id": n.get("node_id"),
+            "display_name": n.get("display_name"),
+            "ip": n.get("ip"),
+            "role": n.get("role"),
+            "up": n.get("up"),
+            "health_status": n.get("health_status"),
+            "slurm_state": n.get("slurm_state"),
+            "telemetry_age_seconds": n.get("telemetry_age_seconds"),
+            "cpu_utilization_percent": n.get("cpu_utilization_percent"),
+            "cpu_iowait_percent": n.get("cpu_iowait_percent"),
+            "memory_used_percent": n.get("memory_used_percent"),
+            "swap_used_percent": n.get("swap_used_percent"),
+            "load1": n.get("load1"),
+            "normalized_load1": n.get("normalized_load1"),
+            "scratch_used_percent": n.get("scratch_used_percent"),
+            "disk_io_utilization_percent": n.get("disk_io_utilization_percent"),
+            "network_errors_per_second": n.get("network_errors_per_second"),
+            "v7_detection": n.get("v7_detection"),
+            "lstm_v8_status": n.get("lstm_v8_status"),
+        }
+        for n in nodes
+    ]
+
+    return {
+        "timestamp_utc": snap.get("timestamp_utc"),
+        "mode": snap.get("mode"),
+        "kpis": snap.get("kpis"),
+        "nodes": compact_nodes,
+        "slurm_jobs": (snap.get("slurm_jobs") or [])[:25],
+        "active_incidents": list_episodes(limit=25),
+        "recent_v7_observations": list_model_observations(
+            model_name="v7",
+            node_id=target_node_id,
+            limit=30,
+        ),
+        "recent_lstm_observations": list_model_observations(
+            model_name="lstm_v8",
+            node_id=target_node_id,
+            limit=30,
+        ),
+        "telemetry_window_samples": query_telemetry_history(
+            range_minutes=range_minutes,
+            node_id=target_node_id,
+            limit=120,
+        )[:60],
+    }
+
+
+@app.get("/api/ai/history")
+def get_ai_chat_history(
+    session_id: Optional[str] = Query("default"),
+    limit: int = Query(80, ge=1, le=200),
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "messages": list_gemini_messages(session_id=session_id, limit=limit),
+    }
+
+
+@app.post("/api/ai/chat")
+def ai_chat_endpoint(
+    req: AIChatRequest,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    snap = orchestrator.latest_snapshot or orchestrator.step_once()
+    evidence = _build_gemini_live_evidence(snap, range_minutes=req.range_minutes)
+    history = list_gemini_messages(session_id=req.session_id, limit=20)
+    try:
+        res = generate_ai_interaction(
+            mode="chat",
+            question=req.question,
+            evidence=evidence,
+            conversation_history=history,
+        )
+    except GeminiConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except (ValueError, GeminiGenerationError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    user_email = current_user.get("email", "")
+    append_gemini_message(req.session_id, user_email, "user", "chat", req.question, {"range_minutes": req.range_minutes})
+    append_gemini_message(req.session_id, user_email, "assistant", "chat", res["answer"], {"model": res["model"]})
+    return {
+        **res,
+        "session_id": req.session_id,
+        "evidence_summary": {
+            "timestamp_utc": evidence["timestamp_utc"],
+            "nodes_count": len(evidence["nodes"]),
+            "incidents_count": len(evidence["active_incidents"]),
+            "slurm_jobs_count": len(evidence["slurm_jobs"]),
+        },
+    }
+
+
+@app.post("/api/ai/investigate-incident")
+def ai_investigate_incident_endpoint(
+    req: AIInvestigateRequest,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    snap = orchestrator.latest_snapshot or orchestrator.step_once()
+    episodes = list_episodes(limit=100)
+    target_episode = next((e for e in episodes if e["id"] == req.episode_id), None) if req.episode_id else None
+    if req.episode_id and not target_episode:
+        raise HTTPException(status_code=404, detail="Target incident episode not found")
+
+    target_node = req.node_id or (target_episode.get("node_id") if target_episode else None)
+    evidence = _build_gemini_live_evidence(snap, range_minutes=120, target_node_id=target_node)
+    evidence["target_episode"] = target_episode
+
+    if target_node:
+        try:
+            logs_res = retrieve_node_logs(node_id=target_node, category="system", lines=40)
+            evidence["recent_system_logs"] = logs_res.get("entries", [])[:25]
+        except Exception:
+            evidence["recent_system_logs"] = []
+
+    try:
+        res = generate_ai_interaction(
+            mode="incident_investigation",
+            question=req.question,
+            evidence=evidence,
+        )
+    except GeminiConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except (ValueError, GeminiGenerationError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    user_email = current_user.get("email", "")
+    append_gemini_message(
+        req.session_id,
+        user_email,
+        "user",
+        "incident_investigation",
+        f"[Episode #{req.episode_id or '-'} / Node {target_node or 'cluster'}] {req.question}",
+        {"episode_id": req.episode_id, "node_id": target_node},
+    )
+    append_gemini_message(
+        req.session_id,
+        user_email,
+        "assistant",
+        "incident_investigation",
+        res["answer"],
+        {"episode_id": req.episode_id, "node_id": target_node, "model": res["model"]},
+    )
+    return {
+        **res,
+        "target_episode": target_episode,
+        "target_node": target_node,
+    }
+
+
+@app.post("/api/ai/query-analytics")
+def ai_analytics_query_endpoint(
+    req: AIAnalyticsQueryRequest,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    range_key = req.range_key if req.range_key in RANGE_CONFIG else "24h"
+    minutes, _ = RANGE_CONFIG[range_key]
+    snap = orchestrator.latest_snapshot or orchestrator.step_once()
+    evidence = _build_gemini_live_evidence(snap, range_minutes=minutes)
+    evidence["analytics_summary"] = get_performance_analytics_summary(range_key=range_key)
+    evidence["model_comparison"] = compute_model_comparison_summary()
+
+    try:
+        res = generate_ai_interaction(
+            mode="cluster_analytics",
+            question=req.question,
+            evidence=evidence,
+        )
+    except GeminiConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except (ValueError, GeminiGenerationError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    user_email = current_user.get("email", "")
+    append_gemini_message(req.session_id, user_email, "user", "cluster_analytics", f"[{range_key}] {req.question}", {"range_key": range_key})
+    append_gemini_message(req.session_id, user_email, "assistant", "cluster_analytics", res["answer"], {"range_key": range_key, "model": res["model"]})
+    return {
+        **res,
+        "range_key": range_key,
+    }
+
+
+@app.post(
+    "/api/ai/test",
+    dependencies=[Depends(require_admin_role)],
+)
+def test_gemini_endpoint() -> Dict[str, Any]:
+    return test_gemini_connection()
+
+
+# ---------------------------------------------------------------------------
+# Phase 7: User Management, Audit Logs & Backups
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/api/admin/users",
+    dependencies=[Depends(require_admin_role)],
+)
+def admin_list_users() -> Dict[str, Any]:
+    return {
+        "users": list_auth_users(),
+        "invitations": list_auth_invitations(limit=100),
+    }
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(
+    user_id: int,
+    req: UserUpdateRequest,
+    current_user: Dict[str, Any] = Depends(require_roles("super_admin")),
+) -> Dict[str, Any]:
+    if req.role is not None and req.role not in ("super_admin", "admin", "viewer"):
+        raise HTTPException(status_code=400, detail="Unsupported role")
+    if user_id == current_user.get("id") and req.is_active is False:
+        raise HTTPException(status_code=400, detail="Cannot deactivate your own active account")
+    if user_id == current_user.get("id") and req.role is not None and req.role != "super_admin":
+        raise HTTPException(status_code=400, detail="Cannot demote your own super_admin role")
+
+    updated = update_auth_user(user_id=user_id, role=req.role, is_active=req.is_active)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    record_auth_event(
+        event_type="admin_user_updated",
+        actor_user_id=current_user.get("id"),
+        target_email=updated.get("email"),
+        details={"role": updated.get("role"), "is_active": updated.get("is_active")},
+    )
+    return {"saved": True, "user": updated}
+
+
+@app.get(
+    "/api/admin/audit-logs",
+    dependencies=[Depends(require_admin_role)],
+)
+def admin_get_audit_logs() -> Dict[str, Any]:
+    return {
+        "auth_events": list_auth_audit_logs(limit=120),
+        "slurm_actions": list_slurm_audit(limit=100),
+        "terminal_commands": list_terminal_audit(limit=100),
+    }
+
+
+@app.get(
+    "/api/admin/backup/database",
+    dependencies=[Depends(require_roles("super_admin"))],
+)
+def download_sqlite_backup() -> Response:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = Path(tmpdir) / "hpc_aiops_backup.db"
+        backup_database_to_file(str(dest))
+        payload = dest.read_bytes()
+    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=payload,
+        media_type="application/x-sqlite3",
+        headers={"Content-Disposition": f'attachment; filename="hpc_aiops_backup_{ts_slug}.db"'},
+    )
+
+
+@app.get(
+    "/api/admin/backup/settings",
+    dependencies=[Depends(require_admin_role)],
+)
+def download_settings_backup() -> Response:
+    bundle = {
+        "exported_utc": datetime.now(timezone.utc).isoformat(),
+        "settings": get_app_settings(),
+        "experiments": list_experiments(limit=500),
+    }
+    ts_slug = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=json.dumps(bundle, indent=2, default=str).encode("utf-8"),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="hpc_aiops_config_{ts_slug}.json"'},
+    )
 
 
 # ---------------------------------------------------------------------------

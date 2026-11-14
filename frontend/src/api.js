@@ -105,11 +105,6 @@ export const api = {
       method: 'POST',
     }),
 
-  reloadModels: () =>
-    request('/api/models/reload', {
-      method: 'POST',
-    }),
-
   switchMode: (mode, prometheus_url = null, preset_id = null) =>
     request('/api/mode', {
       method: 'POST',
@@ -340,15 +335,136 @@ export const api = {
       }),
     }),
 
-  alertAction: (episode_id, action) =>
+  getAlerts: (params = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v) q.set(k, String(v));
+    });
+    const qs = q.toString();
+    return request(`/api/alerts${qs ? `?${qs}` : ''}`);
+  },
+
+  alertAction: (episode_id, action, note = null) =>
     request(`/api/alerts/${episode_id}/action`, {
       method: 'POST',
       body: JSON.stringify({
         action,
+        ...(note ? { note } : {}),
       }),
     }),
 
-  // Settings & Service Health
+  // Monitoring Export
+
+  getMonitoringExportUrl: (rangeKey = '1h', nodeId = null) => {
+    const q = new URLSearchParams({ range_key: rangeKey });
+    if (nodeId) q.set('node_id', nodeId);
+    return `${API_BASE}/api/monitoring/export?${q.toString()}`;
+  },
+
+  // AI Models — V7 Isolation Forest, LSTM V8 & Evaluation
+
+  getModelsStatus: () =>
+    request('/api/models/status'),
+
+  getV7Scores: () =>
+    request('/api/models/v7/scores'),
+
+  toggleV7Integration: (enabled) =>
+    request('/api/models/v7/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: Boolean(enabled) }),
+    }),
+
+  refreshV7Scores: () =>
+    request('/api/models/v7/refresh', { method: 'POST' }),
+
+  getLstmV8State: () =>
+    request('/api/models/lstm-v8/state'),
+
+  toggleLstmV8Integration: (enabled) =>
+    request('/api/models/lstm-v8/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: Boolean(enabled) }),
+    }),
+
+  refreshLstmV8State: () =>
+    request('/api/models/lstm-v8/refresh', { method: 'POST' }),
+
+  getModelsEvaluation: () =>
+    request('/api/models/evaluation'),
+
+  // Experiments & Evaluation
+
+  getExperiments: (category = null) => {
+    const qs = category ? `?category=${encodeURIComponent(category)}` : '';
+    return request(`/api/experiments${qs}`);
+  },
+
+  createExperiment: (payload) =>
+    request('/api/experiments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateExperiment: (id, payload) =>
+    request(`/api/experiments/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteExperiment: (id) =>
+    request(`/api/experiments/${id}`, { method: 'DELETE' }),
+
+  // AI Intelligence Centre (Gemini LLM) & AI Reports
+
+  getAiHistory: (sessionId = 'default', limit = 80) =>
+    request(`/api/ai/history?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
+
+  aiChat: (question, sessionId = 'default', rangeMinutes = 60) =>
+    request('/api/ai/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        question,
+        session_id: sessionId,
+        range_minutes: rangeMinutes,
+      }),
+    }),
+
+  aiInvestigateIncident: (payload) =>
+    request('/api/ai/investigate-incident', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  aiQueryAnalytics: (question, rangeKey = '24h', sessionId = 'default') =>
+    request('/api/ai/query-analytics', {
+      method: 'POST',
+      body: JSON.stringify({
+        question,
+        range_key: rangeKey,
+        session_id: sessionId,
+      }),
+    }),
+
+  testGeminiConnection: () =>
+    request('/api/ai/test', { method: 'POST' }),
+
+  generateAiReport: (reportType = 'cluster_summary', rangeMinutes = 60) =>
+    request('/api/reports/ai/generate', {
+      method: 'POST',
+      body: JSON.stringify({ report_type: reportType, range_minutes: rangeMinutes }),
+    }),
+
+  getAiReportArchive: (limit = 50) =>
+    request(`/api/reports/ai/archive?limit=${limit}`),
+
+  getAiReportStatus: (reportId) =>
+    request(`/api/reports/ai/status/${reportId}`),
+
+  getAiReportDetails: (reportId) =>
+    request(`/api/reports/ai/${reportId}`),
+
+  // Settings, Security, Terminal Audit & Backups
 
   getSettings: () =>
     request('/api/settings'),
@@ -366,6 +482,27 @@ export const api = {
         prometheus_url,
       }),
     }),
+
+  getTerminalAudit: (limit = 100) =>
+    request(`/api/terminal/audit?limit=${limit}`),
+
+  getAdminUsers: () =>
+    request('/api/admin/users'),
+
+  updateAdminUser: (userId, payload) =>
+    request(`/api/admin/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  getAdminAuditLogs: () =>
+    request('/api/admin/audit-logs'),
+
+  getDatabaseBackupUrl: () =>
+    `${API_BASE}/api/admin/backup/database`,
+
+  getSettingsBackupUrl: () =>
+    `${API_BASE}/api/admin/backup/settings`,
 };
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,14 @@
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BrainCircuit,
+  BarChart3,
   Check,
+  CheckCircle2,
   Copy,
   Flame,
+  FlaskConical,
+  Power,
   RefreshCw,
   ShieldAlert,
   Sparkles,
@@ -17,7 +21,9 @@ import {
   HardDrive,
   Activity,
   Server,
+  XCircle,
 } from 'lucide-react';
+import { api } from '../api.js';
 import {
   Area,
   CartesianGrid,
@@ -138,9 +144,16 @@ function LSTMV8Section({
   snapshot,
   selectedNodeId,
   onSelectNode,
+  lstmOverride = null,
+  isAdmin = false,
+  busyAction = false,
+  onToggleEnabled,
+  onRefresh,
 }) {
   const { chartTheme } = useTheme();
-  const lstmStatus = snapshot?.lstm_v8 || {};
+  const lstmStatus = lstmOverride || snapshot?.lstm_v8 || {};
+  const lstmEnabled = lstmStatus.enabled !== false;
+  const lstmStale = Boolean(lstmStatus.stale);
   const lstmState = lstmStatus.state || {};
   const lstmNodes = lstmState.nodes || {};
 
@@ -212,31 +225,75 @@ function LSTMV8Section({
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-lg font-bold">
-                  LSTM V8 Early Warning & Forecasting
+                  V8 LSTM 
                 </h3>
 
                 <span
-                  className={`rounded-full px-2 py-1 text-[10px] font-bold ${
-                    connected
+                  className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase ${
+                    !lstmEnabled
+                      ? 'bg-slate-500/20 spu-text-muted'
+                      : lstmStale
+                      ? 'bg-amber-500/15 text-amber-400'
+                      : connected
                       ? 'bg-emerald-500/15 text-emerald-400'
                       : 'bg-rose-500/15 text-rose-400'
                   }`}
                 >
-                  {connected ? 'API CONNECTED' : 'API DISCONNECTED'}
+                  {!lstmEnabled
+                    ? 'DISABLED (CLUSTER SERVICE SEPARATE)'
+                    : lstmStale
+                    ? `STALE (${lstmStatus.age_seconds ?? '?'}s)`
+                    : lstmStatus.status === 'not_configured'
+                    ? 'NOT CONFIGURED'
+                    : connected
+                    ? 'API CONNECTED'
+                    : 'API DISCONNECTED'}
                 </span>
               </div>
 
-              <p className="text-xs spu-text-secondary">
-                Deployed LSTM V8 inference service · HPC cluster resource forecasting
-              </p>
+             
+              {lstmStatus.last_error && (
+                <p className="mt-1 text-[11px] text-rose-400">
+                  Last error: {lstmStatus.last_error}
+                </p>
+              )}
             </div>
           </div>
 
-          <div className="text-right text-xs spu-text-secondary">
-            <div>Last successful API update</div>
-            <strong className="font-mono">
-              {formatTimestamp(lstmStatus.last_success_utc)}
-            </strong>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="text-right text-xs spu-text-secondary">
+              <div>Last successful API update</div>
+              <strong className="font-mono">
+                {formatTimestamp(lstmStatus.last_success_utc)}
+                {lstmStatus.age_seconds != null ? ` (${lstmStatus.age_seconds}s ago)` : ''}
+              </strong>
+            </div>
+            {onRefresh && (
+              <button
+                type="button"
+                disabled={busyAction || !lstmEnabled}
+                onClick={onRefresh}
+                className="inline-flex items-center gap-1.5 rounded-lg border spu-border px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--accent-cyan)] disabled:opacity-50"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Refresh
+              </button>
+            )}
+            {onToggleEnabled && isAdmin && (
+              <button
+                type="button"
+                disabled={busyAction}
+                onClick={() => onToggleEnabled(!lstmEnabled)}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                  lstmEnabled
+                    ? 'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+                    : 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                }`}
+              >
+                <Power className="h-3.5 w-3.5" />
+                {lstmEnabled ? 'Disable Polling' : 'Enable Polling'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -419,11 +476,9 @@ function LSTMV8Section({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h4 className="text-sm font-bold">
-                  Resource Forecasts — {getLstmNodeName(selectedLstmNodeId)}
+                  Resource Forecasts - {getLstmNodeName(selectedLstmNodeId)}
                 </h4>
-                <p className="mt-1 text-xs spu-text-secondary">
-                  Predicted resource metrics across the available forecast horizons.
-                </p>
+                
               </div>
 
               <div className="text-right text-[10px] spu-text-secondary">
@@ -463,8 +518,7 @@ function LSTMV8Section({
                 <Clock className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
                   <strong>Forecast awaiting validation.</strong>
-                  These are model-generated predictions. They have not yet
-                  been confirmed against the corresponding future observations.
+                  
                 </div>
               </div>
             )}
@@ -525,10 +579,7 @@ function LSTMV8Section({
                 <h4 className="text-sm font-bold">
                   Forecast Trend Analysis
                 </h4>
-                <p className="mt-1 text-xs spu-text-secondary">
-                  How the selected resource metric changes across the four
-                  forecast horizons.
-                </p>
+               
               </div>
 
               <select
@@ -750,476 +801,489 @@ function LSTMV8Section({
   );
 }
 
+export function unwrapModelPayload(payload, wrapperKey, prev = null) {
+  if (!payload || typeof payload !== 'object') {
+    return prev && typeof prev === 'object' ? prev : null;
+  }
+  const nestedStatus =
+    payload.status && typeof payload.status === 'object' && !Array.isArray(payload.status)
+      ? payload.status
+      : null;
+  const actionWrapped =
+    wrapperKey &&
+    payload[wrapperKey] &&
+    typeof payload[wrapperKey] === 'object' &&
+    !Array.isArray(payload[wrapperKey])
+      ? payload[wrapperKey]
+      : null;
+  const flatStatus =
+    !nestedStatus && !actionWrapped && typeof payload.status !== 'object' ? payload : null;
+
+  const statusObj = nestedStatus || actionWrapped || flatStatus || {};
+  const nextHistory =
+    payload.history && typeof payload.history === 'object' && !Array.isArray(payload.history)
+      ? payload.history
+      : prev?.history && typeof prev.history === 'object'
+      ? prev.history
+      : undefined;
+
+  const merged = {
+    ...(prev && typeof prev === 'object' ? prev : {}),
+    ...statusObj,
+  };
+  if (nextHistory !== undefined) {
+    merged.history = nextHistory;
+  }
+  return merged;
+}
+
+function safeText(value, fallback = '') {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return fallback;
+}
+
 export default function AiPredictionsPage({
   snapshot,
+  user,
   selectedNodeId,
   onSelectNode,
-  onReloadModels,
-  onOpenFaultLab,
-  busyAction,
+  onNavigate,
+  showToast,
 }) {
   const { chartTheme } = useTheme();
-  const [horizon, setHorizon] = useState('1h');
-  const [copied, setCopied] = useState(false);
-
   const nodes = snapshot?.nodes || [];
-  const modelStatus = snapshot?.model_status || {};
+  const isAdmin = ['admin', 'super_admin'].includes(user?.role);
+
+  const [v7Detail, setV7Detail] = useState(null);
+  const [lstmDetail, setLstmDetail] = useState(null);
+  const [evaluation, setEvaluation] = useState(null);
+  const [busyModel, setBusyModel] = useState('');
 
   const activeNode = useMemo(
     () => nodes.find((n) => n.node_id === selectedNodeId) || nodes[0] || null,
     [nodes, selectedNodeId]
   );
 
-  const nodeSeries = snapshot?.history?.[activeNode?.node_id] || [];
-  const evalMetrics = modelStatus.evaluation_metrics;
-
-  const getHorizonProb = (node) => {
-    if (!node) return 0;
-    if (horizon === '6h') return (node.failure_prob_6h || 0) * 100;
-    if (horizon === '24h') return (node.failure_prob_24h || 0) * 100;
-    return (node.failure_prob_1h || 0) * 100;
+  const loadModelDetails = async () => {
+    try {
+      const [v7Res, lstmRes, evalRes] = await Promise.allSettled([
+        api.getV7Scores(),
+        api.getLstmV8State(),
+        api.getModelsEvaluation(),
+      ]);
+      if (v7Res.status === 'fulfilled') {
+        setV7Detail((prev) => unwrapModelPayload(v7Res.value, 'v7', prev));
+      }
+      if (lstmRes.status === 'fulfilled') {
+        setLstmDetail((prev) => unwrapModelPayload(lstmRes.value, 'lstm_v8', prev));
+      }
+      if (evalRes.status === 'fulfilled' && evalRes.value && typeof evalRes.value === 'object') {
+        setEvaluation(evalRes.value);
+      }
+    } catch {
+      // Snapshot still provides baseline fields
+    }
   };
 
-  const copyPlaybook = () => {
-    if (!activeNode?.playbook_cmd) return;
+  useEffect(() => {
+    loadModelDetails();
+    const timer = setInterval(loadModelDetails, 15000);
+    return () => clearInterval(timer);
+  }, []);
 
-    navigator.clipboard.writeText(activeNode.playbook_cmd);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+  const v7Meta = v7Detail || snapshot?.model_status?.v7_isolation_forest || {};
+  const v7Enabled = v7Meta.enabled !== false;
+  const v7NodesMap = v7Meta.nodes || {};
+  const v7HistoryMap = v7Detail?.history || {};
+
+  const lstmMeta = lstmDetail || snapshot?.lstm_v8 || snapshot?.model_status?.lstm_v8 || {};
+
+  const activeModelNodeKey = activeNode
+    ? LSTM_NODE_MAP[activeNode.node_id] || activeNode.node_id
+    : 'compute001';
+
+  const v7ChartData = useMemo(() => {
+    const rawHist = v7HistoryMap[activeModelNodeKey] || [];
+    return rawHist.slice(-45).map((pt) => ({
+      time: pt.timestamp_utc
+        ? new Date(pt.timestamp_utc).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : '',
+      score: typeof pt.anomaly_score === 'number' ? Number(pt.anomaly_score.toFixed(4)) : null,
+      threshold: typeof pt.threshold === 'number' ? Number(pt.threshold.toFixed(4)) : null,
+    }));
+  }, [v7HistoryMap, activeModelNodeKey]);
+
+  const handleToggleV7 = async (nextEnabled) => {
+    setBusyModel('v7');
+    try {
+      const res = await api.toggleV7Integration(nextEnabled);
+      setV7Detail((prev) => unwrapModelPayload(res, 'v7', prev));
+      showToast?.(
+        nextEnabled
+          ? 'V7 dashboard integration enabled (resuming /scores/latest polling)'
+          : 'V7 dashboard integration disabled (cluster scoring service left untouched)'
+      );
+      await loadModelDetails();
+    } catch (err) {
+      showToast?.(`Failed to toggle V7 integration: ${err.message}`);
+    } finally {
+      setBusyModel('');
+    }
   };
+
+  const handleRefreshV7 = async () => {
+    setBusyModel('v7');
+    try {
+      const res = await api.refreshV7Scores();
+      setV7Detail((prev) => unwrapModelPayload(res, 'v7', prev));
+      showToast?.('Refreshed V7 /scores/latest');
+    } catch (err) {
+      showToast?.(`V7 refresh error: ${err.message}`);
+    } finally {
+      setBusyModel('');
+    }
+  };
+
+  const handleToggleLstm = async (nextEnabled) => {
+    setBusyModel('lstm');
+    try {
+      const res = await api.toggleLstmV8Integration(nextEnabled);
+      setLstmDetail((prev) => unwrapModelPayload(res, 'lstm_v8', prev));
+      showToast?.(
+        nextEnabled
+          ? 'LSTM V8 dashboard polling enabled'
+          : 'LSTM V8 dashboard polling disabled (cached results kept read-only)'
+      );
+      await loadModelDetails();
+    } catch (err) {
+      showToast?.(`Failed to toggle LSTM V8: ${err.message}`);
+    } finally {
+      setBusyModel('');
+    }
+  };
+
+  const handleRefreshLstm = async () => {
+    setBusyModel('lstm');
+    try {
+      const res = await api.refreshLstmV8State();
+      setLstmDetail((prev) => unwrapModelPayload(res, 'lstm_v8', prev));
+      showToast?.('Refreshed LSTM V8 state');
+    } catch (err) {
+      showToast?.(`LSTM V8 refresh error: ${err.message}`);
+    } finally {
+      setBusyModel('');
+    }
+  };
+
+  const detectorEval = evaluation?.detector_evaluation || {};
+  const runtimeBurden = evaluation?.runtime_burden || {};
+  const workloadBreakdown = evaluation?.workload_breakdown || [];
 
   return (
-    <div className="space-y-5">
-      {/* Existing dashboard ModelEngine predictions remain separate. */}
+    <div className="space-y-6">
+      {/* Page Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-500/15 text-[var(--accent-cyan)]">
             <BrainCircuit className="h-5 w-5" />
           </div>
           <div>
-            <h2 className="text-xl font-bold tracking-tight">
-              AI &amp; Predictions
-            </h2>
-            <p className="text-xs spu-text-secondary">
-              Predictive node failure analysis, multi-detector anomaly
-              consensus &amp; root-cause attributions
-            </p>
+            <h2 className="text-xl font-bold tracking-tight">AI Model Centre</h2>
+           
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="spu-subcard inline-flex p-1 text-xs">
-            {[
-              { id: '1h', label: '1h Horizon' },
-              { id: '6h', label: '6h Horizon' },
-              { id: '24h', label: '24h Horizon' },
-            ].map((h) => (
+        
+      </div>
+
+      {/* Model Architecture Separation Notice */}
+      <div className="spu-card flex flex-wrap items-center justify-between gap-3 p-4 text-xs spu-text-secondary">
+        <div>
+          
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {onNavigate && (
+            <>
               <button
-                key={h.id}
-                onClick={() => setHorizon(h.id)}
-                className={`rounded-md px-2.5 py-1 font-semibold transition ${
-                  horizon === h.id
-                    ? 'bg-[var(--accent-cyan-strong)] text-white'
-                    : 'spu-text-secondary hover:text-[var(--text-primary)]'
-                }`}
+                type="button"
+                onClick={() => onNavigate('intelligence')}
+                className="inline-flex items-center gap-1.5 rounded-lg border spu-border px-2.5 py-1.5 font-semibold text-[var(--accent-cyan)] hover:bg-cyan-500/10"
               >
-                {h.label}
+                <Sparkles className="h-3.5 w-3.5" />
+                Ask Gemini LLM
               </button>
-            ))}
-          </div>
-
-          <button
-            onClick={onReloadModels}
-            disabled={busyAction}
-            className="spu-btn-secondary inline-flex items-center gap-1.5"
-          >
-            <RefreshCw
-              className={`h-3.5 w-3.5 ${
-                busyAction ? 'animate-spin' : ''
-              }`}
-            />
-            Reload .pkl Models
-          </button>
-
-          {snapshot?.mode === 'live_cluster_sim' && (
-            <button
-              onClick={onOpenFaultLab}
-              className="spu-btn-secondary inline-flex items-center gap-1.5 text-rose-400 border-rose-500/40"
-            >
-              <Flame className="h-3.5 w-3.5" />
-              Fault Test Lab
-            </button>
+              <button
+                type="button"
+                onClick={() => onNavigate('experiments')}
+                className="inline-flex items-center gap-1.5 rounded-lg border spu-border px-2.5 py-1.5 font-semibold hover:border-[var(--accent-cyan)]"
+              >
+                <FlaskConical className="h-3.5 w-3.5" />
+                Label Experiments
+              </button>
+            </>
           )}
         </div>
       </div>
 
-      {/* NEW: Deployed LSTM V8 model integration */}
-      <LSTMV8Section
-        snapshot={snapshot}
-        selectedNodeId={selectedNodeId}
-        onSelectNode={onSelectNode}
-      />
-
-      {/* Existing provenance legend */}
-      <div className="spu-card flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-xs">
-        <div className="flex flex-wrap items-center gap-4">
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
-            <strong>Live Observation:</strong> Measured Prometheus/Exporter telemetry
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-cyan-400" />
-            <strong>Anomaly Score:</strong> Unsupervised 4-detector consensus (IF, OCSVM, LOF, K-Means)
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full bg-rose-400" />
-            <strong>Model Prediction:</strong> Supervised failure probability ({modelStatus.engine_label})
-          </span>
-        </div>
-      </div>
-
-      {/* Existing per-node ModelEngine prediction matrix */}
-      <section className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
-        {nodes.map((node) => {
-          const prob = getHorizonProb(node);
-          const selected = activeNode?.node_id === node.node_id;
-          const votes = node.consensus_votes || {};
-
-          return (
-            <div
-              key={node.node_id}
-              onClick={() => onSelectNode(node.node_id)}
-              className={`spu-card cursor-pointer p-4 transition ${
-                selected
-                  ? 'ring-2 ring-[var(--accent-cyan)]'
-                  : 'hover:border-[var(--accent-cyan)]'
-              }`}
-            >
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="text-sm font-bold">
-                    {node.display_name || node.node_id}
-                  </div>
-                  <div className="text-[11px] spu-text-muted">
-                    Class:{' '}
-                    <strong>
-                      {node.health_classification || 'Healthy'}
-                    </strong>
-                  </div>
-                </div>
+      {/* Section 1: V7 Isolation Forest */}
+      <section className="spu-card space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 spu-border">
+          <div className="flex items-center gap-2.5">
+            <ShieldAlert className="h-5 w-5 text-[var(--accent-cyan)]" />
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-base font-bold">V7 Isolation Forest</h3>
                 <span
-                  className={`rounded px-2 py-0.5 text-[10px] font-bold ${
-                    prob >= 40
-                      ? 'bg-rose-500 text-white'
-                      : prob >= 18
-                      ? 'bg-amber-500 text-slate-950'
-                      : prob >= 1.5
-                      ? 'bg-sky-500/20 text-sky-400'
-                      : 'bg-emerald-500/15 text-emerald-400'
+                  className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                    !v7Enabled
+                      ? 'bg-slate-500/20 spu-text-muted'
+                      : v7Meta.stale
+                      ? 'bg-amber-500/15 text-amber-400'
+                      : v7Meta.connected
+                      ? 'bg-emerald-500/15 text-emerald-400'
+                      : 'bg-rose-500/15 text-rose-400'
                   }`}
                 >
-                  {node.alert_priority === 'OK'
-                    ? 'NORMAL'
-                    : node.alert_priority}
+                  {!v7Enabled
+                    ? 'DISABLED'
+                    : v7Meta.stale
+                    ? `STALE (${v7Meta.age_seconds ?? '?'}s)`
+                    : safeText(v7Meta.status) || (v7Meta.connected ? 'connected' : 'not_configured')}
                 </span>
               </div>
-
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <div className="spu-subcard p-2.5">
-                  <div className="text-[10px] uppercase spu-text-muted">
-                    {horizon} Failure Prob
-                  </div>
-                  <div
-                    className={`font-mono text-lg font-extrabold ${
-                      prob >= 40
-                        ? 'text-rose-400'
-                        : prob >= 18
-                        ? 'text-amber-400'
-                        : 'text-emerald-400'
-                    }`}
-                  >
-                    {prob.toFixed(2)}%
-                  </div>
-                </div>
-
-                <div className="spu-subcard p-2.5">
-                  <div className="text-[10px] uppercase spu-text-muted">
-                    Anomaly Score
-                  </div>
-                  <div className="font-mono text-lg font-extrabold text-[var(--accent-cyan)]">
-                    {((node.anomaly_score || 0) * 100).toFixed(1)}%
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-3 flex items-center justify-between text-[11px]">
-                <span className="spu-text-secondary">
-                  Early Warning:{' '}
-                  <strong className="font-mono">
-                    {node.persistence_progress}
-                  </strong>
-                </span>
-                <div className="flex gap-1">
-                  {[
-                    ['IF', votes.isolation_forest],
-                    ['SVM', votes.one_class_svm],
-                    ['LOF', votes.lof],
-                    ['KM', votes.kmeans],
-                  ].map(([tag, active]) => (
-                    <span
-                      key={tag}
-                      className={`rounded px-1 py-0.5 font-mono text-[9px] font-bold ${
-                        active
-                          ? 'bg-rose-500/25 text-rose-400 border border-rose-500/40'
-                          : 'spu-subcard spu-text-muted'
-                      }`}
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="mt-2 border-t pt-2 text-[10.5px] spu-border spu-text-muted flex justify-between">
-                <span>
-                  Confidence:{' '}
-                  {node.prediction_confidence != null
-                    ? `${(node.prediction_confidence * 100).toFixed(1)}%`
-                    : 'N/A (No ensemble .pkl)'}
-                </span>
-                <span className="font-mono">{node.fault_class}</span>
-              </div>
-            </div>
-          );
-        })}
-      </section>
-
-      {/* Existing history, SHAP, model registry and playbook */}
-      {activeNode && (
-        <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-          <div className="spu-card p-5 lg:col-span-7">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h3 className="text-sm font-bold">
-                  Prediction History &amp; Observed Stress Overlay —{' '}
-                  <span className="text-[var(--accent-cyan)]">
-                    {activeNode.display_name || activeNode.node_id}
-                  </span>
-                </h3>
-                <p className="text-xs spu-text-secondary">
-                  1h &amp; 6h predicted failure risk (%) overlaid against
-                  unsupervised anomaly score &amp; observed memory %
-                </p>
-              </div>
-              <span className="rounded-md px-2 py-1 font-mono text-[11px] spu-subcard">
-                Source: {activeNode.prediction_source}
-              </span>
-            </div>
-
-            <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={nodeSeries}>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke={chartTheme.grid}
-                  />
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fill: chartTheme.axis, fontSize: 10 }}
-                  />
-                  <YAxis
-                    domain={[0, 100]}
-                    tick={{ fill: chartTheme.axis, fontSize: 10 }}
-                    width={34}
-                  />
-                  <Tooltip contentStyle={chartTheme.tooltipStyle} />
-                  <Legend wrapperStyle={{ fontSize: '11px' }} />
-                  <ReferenceLine
-                    y={40}
-                    stroke={chartTheme.red}
-                    strokeDasharray="4 4"
-                  />
-                  <ReferenceLine
-                    y={18}
-                    stroke={chartTheme.amber}
-                    strokeDasharray="4 4"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="failure_prob_pct"
-                    name="Predicted 1h Failure %"
-                    stroke={chartTheme.red}
-                    fill={chartTheme.red}
-                    fillOpacity={0.18}
-                    strokeWidth={2.2}
-                    isAnimationActive={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="failure_prob_6h_pct"
-                    name="Predicted 6h Failure %"
-                    stroke={chartTheme.amber}
-                    strokeDasharray="4 2"
-                    strokeWidth={1.8}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="anomaly_score_pct"
-                    name="Unsupervised Anomaly %"
-                    stroke={chartTheme.cyan}
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="memory"
-                    name="Observed Memory %"
-                    stroke={chartTheme.purple}
-                    strokeWidth={1.5}
-                    dot={false}
-                    connectNulls={false}
-                    isAnimationActive={false}
-                  />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="mt-4 rounded-xl p-3.5 spu-subcard">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-xs font-bold">
-                  <ShieldAlert className="h-4 w-4 text-[var(--accent-cyan)]" />
-                  Model Registry &amp; Validation Monitor
-                </div>
-                <span className="font-mono text-[11px] spu-text-secondary">
-                  {modelStatus.loaded_files?.length || 0} artifact(s) loaded
-                </span>
-              </div>
-
-              {evalMetrics ? (
-                <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4 text-xs">
-                  {Object.entries(evalMetrics).map(([k, v]) => (
-                    <div
-                      key={k}
-                      className="rounded-lg bg-[var(--bg-card)] p-2"
-                    >
-                      <span className="block text-[10px] uppercase spu-text-muted">
-                        {k}
-                      </span>
-                      <strong className="font-mono">{String(v)}</strong>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-2 text-xs spu-text-secondary">
-                  Active Engine: <strong>{modelStatus.engine_label}</strong>.
-                  Validation accuracy/AUC metrics are only displayed when
-                  exported from your Phase 1 notebook
-                  (<code className="font-mono">backend/models/model_metrics.json</code>
-                  {' '}and .pkl files) — no synthetic accuracy figures are fabricated.
+              
+              {Boolean(safeText(v7Meta.last_error)) && (
+                <p className="mt-1 text-[11px] text-amber-400">
+                  Connection note: {safeText(v7Meta.last_error)}
                 </p>
               )}
             </div>
           </div>
 
-          <div className="spu-card flex flex-col justify-between p-5 lg:col-span-5">
-            <div>
-              <div className="flex items-center justify-between border-b pb-3 spu-border">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-[var(--accent-cyan)]" />
-                  <h3 className="text-sm font-bold">
-                    {modelStatus.shap_or_importances_available
-                      ? 'SHAP / Model Feature Importance'
-                      : 'Anomaly Root-Cause Attributions'}
-                  </h3>
-                </div>
-                <span className="rounded px-2 py-0.5 font-mono text-[11px] spu-subcard text-[var(--accent-cyan)]">
-                  {activeNode.fault_label}
-                </span>
-              </div>
-
-              <div className="mt-3 space-y-2.5">
-                {(activeNode.top_features || []).map((feat) => {
-                  const pct = Math.round((feat.impact || 0) * 100);
-
-                  return (
-                    <div
-                      key={feat.feature}
-                      className="rounded-xl p-3 spu-subcard"
-                    >
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-mono font-semibold">
-                          {feat.feature}
-                        </span>
-                        <span className="font-mono text-[var(--accent-cyan)]">
-                          {feat.value} {feat.unit} ({pct}% impact)
-                        </span>
-                      </div>
-
-                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[var(--bg-card)]">
-                        <div
-                          className={`h-full ${
-                            pct >= 65
-                              ? 'bg-rose-500'
-                              : pct >= 30
-                              ? 'bg-amber-400'
-                              : 'bg-cyan-400'
-                          }`}
-                          style={{
-                            width: `${Math.max(4, Math.min(100, pct))}%`,
-                          }}
-                        />
-                      </div>
-
-                      <div className="mt-1 text-[11px] spu-text-muted">
-                        {feat.detail}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-right text-[11px] spu-text-secondary mr-2">
+              <div>Last successful V7 pull</div>
+              <strong className="font-mono">{formatTimestamp(v7Meta.last_success_utc)}</strong>
             </div>
-
-            <div className="mt-4 rounded-xl border border-cyan-500/30 p-3.5 spu-subcard">
-              <div className="flex items-center justify-between">
-                <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[var(--accent-cyan)]">
-                  <Terminal className="h-3.5 w-3.5" />
-                  Recommended Diagnostic Playbook
-                </span>
-                <button
-                  onClick={copyPlaybook}
-                  className="spu-btn-secondary inline-flex items-center gap-1 px-2 py-1 text-[11px]"
-                >
-                  {copied ? (
-                    <>
-                      <Check className="h-3 w-3 text-emerald-400" />
-                      Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3 w-3" />
-                      Copy
-                    </>
-                  )}
-                </button>
-              </div>
-
-              <p className="mt-1.5 text-xs leading-relaxed spu-text-secondary">
-                {activeNode.playbook_advice}
-              </p>
-
-              <pre
-                style={{ backgroundColor: 'var(--bg-log)' }}
-                className="mt-2 overflow-x-auto rounded-lg p-2.5 font-mono text-[11px] text-amber-400 border spu-border"
+            <button
+              type="button"
+              disabled={busyModel === 'v7' || !v7Enabled}
+              onClick={handleRefreshV7}
+              className="inline-flex items-center gap-1.5 rounded-lg border spu-border px-2.5 py-1.5 text-xs font-semibold hover:border-[var(--accent-cyan)] disabled:opacity-50"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Refresh
+            </button>
+            {isAdmin && (
+              <button
+                type="button"
+                disabled={busyModel === 'v7'}
+                onClick={() => handleToggleV7(!v7Enabled)}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                  v7Enabled
+                    ? 'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+                    : 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                }`}
               >
-                {activeNode.playbook_cmd}
-              </pre>
+                <Power className="h-3.5 w-3.5" />
+                {v7Enabled ? 'Disable V7 Integration' : 'Enable V7 Integration'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {!v7Enabled && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            Dashboard V7 consumption is disabled. Any displayed values are cached/stale observations only; the independent cluster-side V7 scoring runner continues undisturbed.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {nodes.map((n) => {
+            const modelKey = LSTM_NODE_MAP[n.node_id] || n.node_id;
+            const liveV7 = v7NodesMap[modelKey] || n.v7_detection || {};
+            const hasScore = typeof liveV7.anomaly_score === 'number';
+            const isAnom = Boolean(liveV7.is_anomaly);
+            return (
+              <div
+                key={n.node_id}
+                onClick={() => onSelectNode?.(n.node_id)}
+                className={`cursor-pointer rounded-xl p-3.5 transition spu-subcard ${
+                  activeNode?.node_id === n.node_id ? 'border-[var(--accent-cyan)]' : ''
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-bold">{n.display_name || n.node_id}</span>
+                  <span
+                    className={`rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase ${
+                      isAnom
+                        ? 'bg-amber-500/20 text-amber-400'
+                        : hasScore
+                        ? 'bg-emerald-500/15 text-emerald-400'
+                        : 'bg-slate-500/15 spu-text-muted'
+                    }`}
+                  >
+                    {hasScore ? (safeText(liveV7.classification) || (isAnom ? 'ANOMALY' : 'NORMAL')) : safeText(liveV7.status, 'pending')}
+                  </span>
+                </div>
+                <div className="mt-2 space-y-1 font-mono text-xs spu-text-secondary">
+                  <div>
+                    Score: <strong className="text-[var(--text-primary)]">{hasScore ? liveV7.anomaly_score.toFixed(4) : '--'}</strong> | Thr:{' '}
+                    <strong>{typeof liveV7.threshold === 'number' ? liveV7.threshold.toFixed(4) : '--'}</strong>
+                  </div>
+                  <div className="text-[10px] spu-text-muted">
+                    Model: {liveV7.model_version || v7Meta.model_version || 'v7'} · {liveV7.feature_count || v7Meta.feature_count || 28}f
+                  </div>
+                  <div className="text-[10px] spu-text-muted truncate">
+                    Updated: {formatTimestamp(liveV7.timestamp_utc)}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* V7 Score Trend Chart for Selected Node */}
+        {v7ChartData.length > 0 && (
+          <div className="spu-subcard p-4">
+            <div className="mb-2 flex items-center justify-between text-xs">
+              <span className="font-semibold">
+                V7 Score vs Node Threshold — {activeNode?.display_name || activeModelNodeKey}
+              </span>
+              <span className="font-mono spu-text-muted">{v7ChartData.length} buffered observations</span>
+            </div>
+            <div className="h-44 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={v7ChartData}>
+                  <CartesianGrid stroke={chartTheme.grid} strokeDasharray="3 3" />
+                  <XAxis dataKey="time" tick={{ fill: chartTheme.axis, fontSize: 10 }} />
+                  <YAxis tick={{ fill: chartTheme.axis, fontSize: 10 }} domain={['auto', 'auto']} />
+                  <Tooltip contentStyle={chartTheme.tooltipStyle} />
+                  <Legend wrapperStyle={{ fontSize: '11px' }} />
+                  <Line type="monotone" dataKey="score" name="Anomaly Score" stroke="#22d3ee" dot={false} strokeWidth={2} />
+                  <Line type="monotone" dataKey="threshold" name="Node Threshold" stroke="#f59e0b" dot={false} strokeDasharray="4 4" />
+                </ComposedChart>
+              </ResponsiveContainer>
             </div>
           </div>
-        </section>
+        )}
+
+       
+      </section>
+
+      {/* Section 2: Real Cluster LSTM V8 Service */}
+      {lstmMeta.enabled === false && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-300">
+          LSTM V8 polling is disabled in the dashboard. Any forecasts or warnings shown below represent cached historical state and will not raise new alerts until re-enabled.
+        </div>
       )}
+      <LSTMV8Section
+        snapshot={snapshot}
+        selectedNodeId={activeNode?.node_id}
+        onSelectNode={onSelectNode}
+        lstmOverride={lstmDetail}
+        isAdmin={isAdmin}
+        busyAction={busyModel === 'lstm'}
+        onToggleEnabled={handleToggleLstm}
+        onRefresh={handleRefreshLstm}
+      />
+
+      {/* Section 3: Model Comparison & Evaluation */}
+      <section className="spu-card space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 spu-border">
+          <div className="flex items-center gap-2.5">
+            <BarChart3 className="h-5 w-5 text-[var(--accent-cyan)]" />
+            <div>
+              <h3 className="text-base font-bold">Model Comparison & Evaluation</h3>
+              
+            </div>
+          </div>
+          {onNavigate && (
+            <button
+              type="button"
+              onClick={() => onNavigate('experiments')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-[var(--accent-cyan)] hover:bg-cyan-500/25"
+            >
+              <FlaskConical className="h-3.5 w-3.5" />
+              Open Experiments & Evaluation
+            </button>
+          )}
+        </div>
+
+        
+
+        {/* Detector Scorecard Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b spu-border spu-text-muted font-mono uppercase text-[10px]">
+                <th className="py-2 pr-3">Detector</th>
+                <th className="py-2 px-3">Detection Coverage</th>
+                <th className="py-2 px-3">Detected / Missed</th>
+                <th className="py-2 px-3">Mean Lead/Delay</th>
+                <th className="py-2 px-3">False Positive Rate</th>
+                <th className="py-2 px-3">Event F1</th>
+                <th className="py-2 pl-3">Alert Burden (Unlabelled Count)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y spu-border font-mono">
+              {[
+                { key: 'v7', label: 'V7 Isolation Forest' },
+                { key: 'lstm_v8', label: 'LSTM V8 Forecaster' },
+                { key: 'telemetry', label: 'Telemetry Threshold Baseline' },
+              ].map(({ key, label }) => {
+                const st = detectorEval[key] || {};
+                const burden = runtimeBurden[key] || {};
+                return (
+                  <tr key={key}>
+                    <td className="py-2.5 pr-3 font-sans font-semibold text-[var(--text-primary)]">{label}</td>
+                    <td className="py-2.5 px-3">
+                      {st.detection_coverage_pct != null ? `${st.detection_coverage_pct}%` : 'Needs labelled faults'}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {st.positive_events > 0 ? `${st.detected_events} hit / ${st.missed_events} missed` : '--'}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {st.mean_detection_delay_min != null ? `${st.mean_detection_delay_min} min` : '--'}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {st.false_positive_rate_pct != null ? `${st.false_positive_rate_pct}% (${st.false_positive_windows}/${st.benign_windows})` : 'Needs benign windows'}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {st.event_f1 != null ? st.event_f1 : '--'}
+                    </td>
+                    <td className="py-2.5 pl-3 spu-text-secondary">
+                      {burden.total_episodes ?? 0} episodes ({burden.open_episodes ?? 0} open)
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {workloadBreakdown.length > 0 && (
+          <div className="spu-subcard p-3">
+            <div className="mb-2 text-xs font-semibold">Performance by Workload Condition</div>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-3 text-xs font-mono">
+              {workloadBreakdown.map((wb) => (
+                <div key={wb.workload_condition} className="rounded border spu-border p-2.5">
+                  <div className="font-sans font-bold uppercase text-[11px]">{wb.workload_condition}</div>
+                  <div className="mt-1 spu-text-secondary">
+                    Faults: {wb.positive_events} · Benign: {wb.benign_windows}
+                  </div>
+                  <div className="mt-1">
+                    Hits — V7: {wb.v7_detected} | LSTM: {wb.lstm_v8_detected} | Thresh: {wb.telemetry_detected}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

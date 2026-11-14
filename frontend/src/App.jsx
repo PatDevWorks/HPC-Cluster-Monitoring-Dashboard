@@ -5,6 +5,7 @@ import { api, createLiveSocket } from './api.js';
 import Sidebar from './components/Sidebar.jsx';
 import HeaderBar from './components/HeaderBar.jsx';
 import ConfirmModal from './components/ConfirmModal.jsx';
+import ErrorBoundary from './components/ErrorBoundary.jsx';
 import FaultInjectionDrawer from './components/FaultInjectionDrawer.jsx';
 import AuthPage from './components/AuthPage.jsx';
 
@@ -19,6 +20,9 @@ import AlertsIncidentsPage from './pages/AlertsIncidentsPage.jsx';
 import PerformanceAnalyticsPage from './pages/PerformanceAnalyticsPage.jsx';
 import ReportsPage from './pages/ReportsPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
+import AiIntelligencePage from './pages/AiIntelligencePage.jsx';
+import ExperimentsPage from './pages/ExperimentsPage.jsx';
+import UserManagementPage from './pages/UserManagementPage.jsx';
 
 export default function App() {
   // Authentication state
@@ -31,6 +35,7 @@ export default function App() {
 
   // Navigation state
   const [activePage, setActivePage] = useState('overview');
+  const [investigateEpisodeId, setInvestigateEpisodeId] = useState(null);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
@@ -253,22 +258,6 @@ export default function App() {
     }
   };
 
-  const handleReloadModels = async () => {
-    setBusyAction(true);
-
-    try {
-      const status = await api.reloadModels();
-
-      showToast(
-        `Model Registry Reloaded: ${status.engine_label} (${status.loaded_files.length} artifacts)`
-      );
-    } catch (err) {
-      showToast(`Model reload failed: ${err.message}`);
-    } finally {
-      setBusyAction(false);
-    }
-  };
-
   const handleTogglePause = async () => {
     try {
       await api.togglePause();
@@ -386,9 +375,9 @@ export default function App() {
   // 8. ALERT AND FAULT INJECTION HANDLERS
   // ---------------------------------------------------------
 
-  const handleAlertAction = async (episodeId, action) => {
+  const handleAlertAction = async (episodeId, action, note = null) => {
     try {
-      await api.alertAction(episodeId, action);
+      await api.alertAction(episodeId, action, note);
       showToast(`Incident #${episodeId}: ${action} applied`);
     } catch (err) {
       showToast(`Alert update failed: ${err.message}`);
@@ -496,6 +485,7 @@ export default function App() {
             {/* Main dashboard content */}
             <main className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
               <div className="mx-auto max-w-[1520px]">
+                <ErrorBoundary resetKey={activePage} sectionLabel={activePage}>
 
                 {!snapshot ? (
                   <div className="flex h-[65vh] flex-col items-center justify-center gap-3 spu-text-secondary">
@@ -543,11 +533,23 @@ export default function App() {
                     {activePage === 'predictions' && (
                       <AiPredictionsPage
                         snapshot={snapshot}
+                        user={user}
                         selectedNodeId={selectedNodeId}
                         onSelectNode={setSelectedNodeId}
-                        onReloadModels={handleReloadModels}
-                        onOpenFaultLab={() => setFaultDrawerOpen(true)}
+                        onNavigate={setActivePage}
+                        showToast={showToast}
                         busyAction={busyAction}
+                      />
+                    )}
+
+                    {activePage === 'intelligence' && (
+                      <AiIntelligencePage
+                        snapshot={snapshot}
+                        user={user}
+                        selectedNodeId={selectedNodeId}
+                        initialEpisodeId={investigateEpisodeId}
+                        onNavigate={setActivePage}
+                        showToast={showToast}
                       />
                     )}
 
@@ -587,6 +589,10 @@ export default function App() {
                         onAlertAction={handleAlertAction}
                         onInspectMonitoring={navigateToNodeMonitoring}
                         onInspectLogs={navigateToNodeLogs}
+                        onInvestigateIncident={(ep) => {
+                          setInvestigateEpisodeId(ep?.id || null);
+                          setActivePage('intelligence');
+                        }}
                         onRequestDrainNodeId={(nodeId) => {
                           const target = (snapshot.nodes || []).find(
                             (node) => node.node_id === nodeId
@@ -603,12 +609,27 @@ export default function App() {
                       />
                     )}
 
+                    {activePage === 'experiments' && (
+                      <ExperimentsPage
+                        snapshot={snapshot}
+                        user={user}
+                        showToast={showToast}
+                      />
+                    )}
+
                     {activePage === 'analytics' && (
-                      <PerformanceAnalyticsPage snapshot={snapshot} />
+                      <PerformanceAnalyticsPage
+                        snapshot={snapshot}
+                        onNavigate={setActivePage}
+                      />
                     )}
 
                     {activePage === 'reports' && (
-                      <ReportsPage snapshot={snapshot} />
+                      <ReportsPage
+                        snapshot={snapshot}
+                        user={user}
+                        showToast={showToast}
+                      />
                     )}
 
                     {activePage === 'settings' && (
@@ -616,13 +637,21 @@ export default function App() {
                         snapshot={snapshot}
                         wsConnected={wsConnected}
                         onSwitchMode={handleSwitchMode}
-                        onReloadModels={handleReloadModels}
+                        showToast={showToast}
+                        user={user}
+                      />
+                    )}
+
+                    {activePage === 'users' && (
+                      <UserManagementPage
+                        user={user}
                         showToast={showToast}
                       />
                     )}
 
                   </>
                 )}
+                </ErrorBoundary>
 
               </div>
             </main>

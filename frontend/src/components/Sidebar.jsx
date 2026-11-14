@@ -11,21 +11,25 @@ import {
   Network,
   Settings,
   Terminal,
+  FlaskConical, Sparkles, Users,
 } from 'lucide-react';
 import SpuLogo from './SpuLogo.jsx';
 
 export const NAV_ITEMS = [
   { id: 'overview', label: 'Overview', icon: Home },
-  { id: 'topology', label: 'Cluster Topology', icon: Network },
-  { id: 'monitoring', label: 'Live Monitoring', icon: Activity },
-  { id: 'predictions', label: 'AI & Predictions', icon: BrainCircuit },
-  { id: 'jobs', label: 'Job Management', icon: Briefcase },
+  { id: 'topology', label: 'Infrastructure Topology', icon: Network },
+  { id: 'monitoring', label: 'Node Monitoring', icon: Activity },
+  { id: 'predictions', label: 'AI Model Centre', icon: BrainCircuit },
+  { id: 'intelligence', label: 'AI Intelligence Centre', icon: Sparkles },
+  { id: 'jobs', label: 'Workload Intelligence', icon: Briefcase },
   { id: 'logs', label: 'Node Logs & Diagnostics', icon: FileTerminal },
-  { id: 'terminal', label: 'Instance Terminal', icon: Terminal },
-  { id: 'alerts', label: 'Alerts & Incidents', icon: Bell, showAlertBadge: true },
-  { id: 'analytics', label: 'Performance Analytics', icon: BarChart3 },
+  { id: 'alerts', label: 'Incidents & Alerts', icon: Bell, showAlertBadge: true },
+  { id: 'experiments', label: 'Experiments & Evaluation', icon: FlaskConical },
+  { id: 'analytics', label: 'Historical Analytics', icon: BarChart3 },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
-  { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'settings', label: 'System Settings', icon: Settings },
+  { id: 'users', label: 'User Management', icon: Users },
+  { id: 'terminal', label: 'Operations Terminal', icon: Terminal },
 ];
 
 function formatSidebarTimestamp(isoStr) {
@@ -57,20 +61,21 @@ export default function Sidebar({
   wsConnected,
 }) {
   const kpis = snapshot?.kpis || {};
-  const healthScore = Math.round(kpis.cluster_health_score ?? 98);
-  const healthLabel = kpis.cluster_health_label || 'Excellent';
+  const nodesOnline = kpis.nodes_online ?? 0;
+  const nodesTotal = kpis.nodes_total ?? 4;
+  const clusterStatus = kpis.cluster_status || 'healthy';
+  const statusLabel = kpis.cluster_status_label || 'Healthy';
   const activeAlerts = kpis.active_episodes_total || 0;
 
   const radius = 28;
   const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference - (Math.max(0, Math.min(100, healthScore)) / 100) * circumference;
+  const availPct = nodesTotal > 0 ? Math.round((nodesOnline / nodesTotal) * 100) : 0;
+  const dashOffset = circumference - (availPct / 100) * circumference;
 
   const ringColor =
-    healthScore >= 90
+    clusterStatus === 'healthy'
       ? '#10b981'
-      : healthScore >= 75
-      ? '#22d3ee'
-      : healthScore >= 55
+      : clusterStatus === 'warning'
       ? '#f59e0b'
       : '#ef4444';
 
@@ -85,17 +90,17 @@ export default function Sidebar({
       }`}
     >
       {/* Top University Branding */}
-      <div>
+      <div className="flex min-h-0 flex-1 flex-col">
         <div
           onClick={() => onNavigate('overview')}
           style={{ borderBottom: '1px solid var(--border-subtle)' }}
-          className="cursor-pointer px-3 py-4"
+          className="shrink-0 cursor-pointer px-3 py-4"
         >
           <SpuLogo collapsed={collapsed} />
         </div>
 
         {/* Navigation Links */}
-        <nav className="mt-2 space-y-0.5 px-2.5">
+        <nav className="mt-2 flex-1 space-y-0.5 overflow-y-auto px-2.5 pb-3">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = activePage === item.id;
@@ -182,12 +187,12 @@ export default function Sidebar({
                   className="transition-all duration-500"
                 />
               </svg>
-              <span className="absolute text-base font-bold">{healthScore}%</span>
+              <span className="absolute text-sm font-bold">{nodesOnline}/{nodesTotal}</span>
             </div>
 
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color: ringColor }}>
               <span className="h-2 w-2 rounded-full" style={{ backgroundColor: ringColor }} />
-              {healthLabel}
+              {statusLabel}
             </div>
 
             <div
@@ -213,12 +218,12 @@ export default function Sidebar({
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-2" title={`Cluster Health: ${healthScore}% (${healthLabel})`}>
+          <div className="flex flex-col items-center gap-2" title={`Cluster Status: ${statusLabel} (${nodesOnline}/${nodesTotal} Online)`}>
             <div
               className="flex h-10 w-10 items-center justify-center rounded-full border-2 text-xs font-bold"
               style={{ borderColor: ringColor, color: ringColor }}
             >
-              {healthScore}%
+              {nodesOnline}/{nodesTotal}
             </div>
             <span
               className={`h-2.5 w-2.5 rounded-full ${

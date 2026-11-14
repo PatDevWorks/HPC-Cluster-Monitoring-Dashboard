@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Sun,
   XCircle,
+  Database, Download, Mail, Sparkles, Terminal,
 } from 'lucide-react';
 import { api } from '../api.js';
 import { useTheme } from '../context/ThemeContext.jsx';
@@ -20,8 +21,8 @@ export default function SettingsPage({
   snapshot,
   wsConnected,
   onSwitchMode,
-  onReloadModels,
   showToast,
+  user,
 }) {
   const { preference, setPreference } = useTheme();
   const [settingsData, setSettingsData] = useState(null);
@@ -31,16 +32,28 @@ export default function SettingsPage({
   const [sshHost, setSshHost] = useState('');
   const [sshUser, setSshUser] = useState('ubuntu');
   const [sshPort, setSshPort] = useState(22);
+  const [v7Enabled, setV7Enabled] = useState(true);
+  const [lstmEnabled, setLstmEnabled] = useState(true);
+  const [restrictedTerminalEnabled, setRestrictedTerminalEnabled] = useState(false);
+  const [emailAlertsEnabled, setEmailAlertsEnabled] = useState(false);
+  const [alertRecipients, setAlertRecipients] = useState('');
+  const [geminiProbeResult, setGeminiProbeResult] = useState(null);
+  const isSuperAdmin = user?.role === 'super_admin';
   const [policy, setPolicy] = useState({
-    p1_critical_prob: 0.4,
-    p2_warning_prob: 0.18,
-    p3_watch_prob: 0.015,
-    scratch_critical_percent: 90,
+    cpu_warning_percent: 95,
+    iowait_warning_percent: 35,
     memory_warning_percent: 88,
     memory_critical_percent: 95,
-    temp_warning_celsius: 78,
-    temp_critical_celsius: 86,
+    scratch_critical_percent: 90,
+    root_critical_percent: 90,
+    normalized_load_warning: 1.25,
+    net_error_warning_per_sec: 1.0,
+    mpi_straggler_warning: 0.45,
+    persistence_ticks: 2,
     cooldown_minutes: 30,
+    stale_telemetry_seconds: 120,
+    enable_v7_alerts: true,
+    enable_lstm_alerts: true,
   });
   const [promProbeResult, setPromProbeResult] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -56,6 +69,17 @@ export default function SettingsPage({
       if (s.ssh_host !== undefined) setSshHost(s.ssh_host);
       if (s.ssh_user) setSshUser(s.ssh_user);
       if (s.ssh_port) setSshPort(Number(s.ssh_port));
+      if (s.v7_enabled !== undefined) setV7Enabled(Boolean(s.v7_enabled));
+      if (s.lstm_v8_enabled !== undefined) setLstmEnabled(Boolean(s.lstm_v8_enabled));
+      if (s.restricted_terminal_enabled !== undefined) {
+        setRestrictedTerminalEnabled(Boolean(s.restricted_terminal_enabled));
+      }
+      if (s.email_alerts_enabled !== undefined) {
+        setEmailAlertsEnabled(Boolean(s.email_alerts_enabled));
+      }
+      if (s.alert_recipient_emails !== undefined) {
+        setAlertRecipients(s.alert_recipient_emails || '');
+      }
       if (s.alert_policy) setPolicy((prev) => ({ ...prev, ...s.alert_policy }));
     } catch (err) {
       showToast(`Failed to load settings: ${err.message}`);
@@ -80,6 +104,21 @@ export default function SettingsPage({
     }
   };
 
+  const handleTestGemini = async () => {
+    try {
+      const res = await api.testGeminiConnection();
+      setGeminiProbeResult(res);
+      showToast(
+        res.ok
+          ? `Gemini connected (${res.model})`
+          : `Gemini probe failed: ${res.error || 'unconfigured'}`
+      );
+    } catch (err) {
+      setGeminiProbeResult({ ok: false, error: err.message });
+      showToast(`Gemini test error: ${err.message}`);
+    }
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -91,6 +130,11 @@ export default function SettingsPage({
         ssh_host: sshHost,
         ssh_user: sshUser,
         ssh_port: Number(sshPort),
+        v7_enabled: v7Enabled,
+        lstm_v8_enabled: lstmEnabled,
+        restricted_terminal_enabled: restrictedTerminalEnabled,
+        email_alerts_enabled: emailAlertsEnabled,
+        alert_recipient_emails: alertRecipients.trim(),
         alert_policy: policy,
       });
       await loadSettings();
@@ -116,9 +160,7 @@ export default function SettingsPage({
         </div>
         <div>
           <h2 className="text-xl font-bold tracking-tight">Settings</h2>
-          <p className="text-xs spu-text-secondary">
-            Infrastructure endpoints, refresh intervals, AI registry, alert thresholds &amp; service health
-          </p>
+          
         </div>
       </div>
 
@@ -155,9 +197,14 @@ export default function SettingsPage({
                 : health.ssh_bridge?.ssh_host || 'Not configured',
             },
             {
-              name: 'ML Model Engine',
-              ok: true,
-              detail: modelStatus.engine_label || 'Active',
+              name: 'V7 Isolation Forest',
+              ok: modelStatus.v7_isolation_forest?.status === 'ready' || modelStatus.v7_isolation_forest?.status === 'connected',
+              detail: modelStatus.v7_isolation_forest?.status || 'pending',
+            },
+            {
+              name: 'LSTM V8 Forecaster',
+              ok: modelStatus.lstm_v8?.status === 'connected',
+              detail: modelStatus.lstm_v8?.status || 'connecting',
             },
           ].map((svc) => (
             <div key={svc.name} className="spu-subcard p-3 flex items-start justify-between">
@@ -376,17 +423,24 @@ export default function SettingsPage({
 
         {/* Alert Thresholds */}
         <div className="border-t pt-4 spu-border">
-          <div className="text-xs font-bold mb-3">Alert &amp; AI Risk Threshold Policy</div>
+          <div className="text-xs font-bold mb-1">Telemetry &amp; Operational Alert Policy</div>
+          <p className="mb-3 text-[11px] spu-text-muted">
+            Hardware sensors (CPU temperature, fan speed, power/energy) are not exposed by cluster hwmon interfaces and are omitted.
+          </p>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">
             {[
-              ['p1_critical_prob', 'P1 Failure Prob (0–1)', 0.01],
-              ['p2_warning_prob', 'P2 Failure Prob (0–1)', 0.01],
-              ['p3_watch_prob', 'P3 Watch Prob (0–1)', 0.005],
-              ['scratch_critical_percent', '/scratch Critical (%)', 1],
+              ['cpu_warning_percent', 'CPU Warning (%)', 1],
+              ['iowait_warning_percent', 'I/O Wait Warning (%)', 1],
               ['memory_warning_percent', 'Memory Warning (%)', 1],
               ['memory_critical_percent', 'Memory Critical (%)', 1],
-              ['temp_warning_celsius', 'Temp Warning (°C)', 1],
+              ['scratch_critical_percent', '/scratch Critical (%)', 1],
+              ['root_critical_percent', 'Root / Critical (%)', 1],
+              ['normalized_load_warning', 'Norm Load Warning (x)', 0.05],
+              ['net_error_warning_per_sec', 'Net Errors Warning (/s)', 0.1],
+              ['mpi_straggler_warning', 'MPI Asymmetry Thr', 0.05],
+              ['persistence_ticks', 'Persistence (ticks)', 1],
               ['cooldown_minutes', 'Alert Cooldown (min)', 5],
+              ['stale_telemetry_seconds', 'Stale Threshold (sec)', 10],
             ].map(([key, label, step]) => (
               <div key={key}>
                 <label className="block spu-text-secondary mb-1">{label}</label>
@@ -402,10 +456,58 @@ export default function SettingsPage({
               </div>
             ))}
           </div>
+
+          <div className="mt-4 flex flex-wrap gap-4 text-xs">
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={v7Enabled}
+                onChange={(e) => setV7Enabled(e.target.checked)}
+              />
+              <span>Enable V7 Isolation Forest dashboard integration</span>
+            </label>
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={lstmEnabled}
+                onChange={(e) => setLstmEnabled(e.target.checked)}
+              />
+              <span>Enable LSTM V8 dashboard integration &amp; polling</span>
+            </label>
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={restrictedTerminalEnabled}
+                onChange={(e) => setRestrictedTerminalEnabled(e.target.checked)}
+              />
+              <span>Enable Restricted Operations Terminal</span>
+            </label>
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={emailAlertsEnabled}
+                onChange={(e) => setEmailAlertsEnabled(e.target.checked)}
+              />
+              <span>Email Admins on P1 Critical Incidents</span>
+            </label>
+          </div>
+
+          <div className="mt-3 text-xs">
+            <label className="block font-semibold mb-1">
+              Incident Notification Recipient Emails (comma-separated, backend Brevo delivery)
+            </label>
+            <input
+              type="text"
+              value={alertRecipients}
+              onChange={(e) => setAlertRecipients(e.target.value)}
+              placeholder="ops@cluster.local, admin@institution.edu"
+              className="spu-input w-full md:w-2/3 font-mono"
+            />
+          </div>
         </div>
       </form>
 
-      {/* 4. Discovered Nodes & AI Model Slot Inventory */}
+      {/* 4. Discovered Nodes & AI Model Integrations */}
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="spu-card p-5">
           <div className="flex items-center gap-2 text-sm font-bold mb-3">
@@ -435,34 +537,93 @@ export default function SettingsPage({
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2 text-sm font-bold">
                 <Cpu className="h-4 w-4 text-[var(--accent-cyan)]" />
-                AI Model Registry (<code className="font-mono text-xs">backend/models/</code>)
+                Model &amp; LLM Integrations
               </div>
-              <button
-                onClick={onReloadModels}
-                className="spu-btn-secondary inline-flex items-center gap-1.5"
-              >
-                <RefreshCw className="h-3.5 w-3.5" /> Reload .pkl
-              </button>
+              <span className="text-[11px] font-mono spu-text-muted">
+                Kept Strictly Separate
+              </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              {Object.entries(modelStatus.detectors || {}).map(([name, st]) => (
-                <div
-                  key={name}
-                  className="flex items-center justify-between rounded-lg px-2.5 py-2 spu-subcard"
-                >
-                  <span className="font-mono text-[11px]">{name}</span>
-                  <span
-                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-                      st === 'pkl'
-                        ? 'bg-emerald-500/20 text-emerald-400'
-                        : 'bg-amber-500/15 text-amber-400'
-                    }`}
+            <div className="space-y-2 text-xs">
+              <div className="flex items-center justify-between rounded-lg px-3 py-2.5 spu-subcard">
+                <div>
+                  <div className="font-bold">V7 Isolation Forest</div>
+                  <div className="text-[11px] spu-text-muted">
+                    28-feature global IF • per-node thresholds • cluster-side scorer
+                  </div>
+                </div>
+                <span className="rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase bg-cyan-500/15 text-[var(--accent-cyan)]">
+                  {modelStatus.v7_isolation_forest?.status || 'pending'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-lg px-3 py-2.5 spu-subcard">
+                <div>
+                  <div className="font-bold">LSTM V8 Temporal Forecaster</div>
+                  <div className="text-[11px] spu-text-muted">
+                    8-feature per-node 60m lookback • 1/15/30/60m forecasts
+                  </div>
+                </div>
+                <span className="rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase bg-cyan-500/15 text-[var(--accent-cyan)]">
+                  {modelStatus.lstm_v8?.status || 'connecting'}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg px-3 py-2.5 spu-subcard">
+                <div>
+                  <div className="font-bold">Gemini LLM Intelligence</div>
+                  <div className="text-[11px] spu-text-muted">
+                    Evidence interpretation &amp; reporting ({health.gemini?.model || 'unconfigured'})
+                  </div>
+                  {geminiProbeResult && (
+                    <div
+                      className={`mt-1 text-[11px] font-mono ${
+                        geminiProbeResult.ok ? 'text-emerald-400' : 'text-rose-400'
+                      }`}
+                    >
+                      {geminiProbeResult.ok
+                        ? `Verified: ${geminiProbeResult.reply || 'OK'}`
+                        : geminiProbeResult.error}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTestGemini}
+                    className="spu-btn-secondary py-1 px-2 text-[11px]"
                   >
-                    {st}
+                    Test Connection
+                  </button>
+                  <span className="rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase bg-cyan-500/15 text-[var(--accent-cyan)]">
+                    {health.gemini?.configured ? 'configured' : 'not_configured'}
                   </span>
                 </div>
-              ))}
+              </div>
+            </div>
+
+            {/* Backup & Restore Downloads */}
+            <div className="mt-4 border-t pt-3 spu-border">
+              <div className="flex items-center gap-1.5 text-xs font-bold mb-2">
+                <Database className="h-3.5 w-3.5 text-[var(--accent-cyan)]" />
+                Configuration &amp; SQLite Backups
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <a
+                  href={api.getSettingsBackupUrl()}
+                  className="spu-btn-secondary inline-flex items-center gap-1.5 text-xs"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Export Settings &amp; Experiments (.json)
+                </a>
+                {isSuperAdmin && (
+                  <a
+                    href={api.getDatabaseBackupUrl()}
+                    className="spu-btn-secondary inline-flex items-center gap-1.5 text-xs"
+                  >
+                    <Download className="h-3.5 w-3.5 text-amber-400" />
+                    Download Full SQLite DB (.db)
+                  </a>
+                )}
+              </div>
             </div>
           </div>
 

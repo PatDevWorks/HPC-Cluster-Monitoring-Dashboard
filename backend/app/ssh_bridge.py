@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import platform
 import re
@@ -9,6 +10,7 @@ from .config import HPC_SSH_HOST, HPC_SSH_KEY_PATH, HPC_SSH_PORT, HPC_SSH_USER
 from .database import get_app_settings
 
 SAFE_NODE_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
+HEADNODE_TARGETS = ("localhost", "127.0.0.1", "head-node", "headnode")
 MAX_OUTPUT_BYTES = 512 * 1024  # 512 KB hard ceiling per command output
 
 # Redaction patterns ensuring credentials, keys, tokens, or secrets never leak in logs/bundles
@@ -37,27 +39,41 @@ def _resolve_ssh_connection() -> Dict[str, Any]:
     Resolve backend-only SSH gateway config without exposing any secret key paths or material.
     """
     settings = get_app_settings()
-    host = (settings.get("ssh_host") or HPC_SSH_HOST or "").strip()
-    user = (settings.get("ssh_user") or HPC_SSH_USER or "ubuntu").strip()
-    port = int(settings.get("ssh_port") or HPC_SSH_PORT or 22)
+    env_host = os.getenv("HPC_SSH_HOST", "").strip() or HPC_SSH_HOST
+    env_user = os.getenv("HPC_SSH_USER", "").strip() or HPC_SSH_USER
+    env_port_raw = os.getenv("HPC_SSH_PORT", "").strip()
+    env_port = int(env_port_raw) if env_port_raw.isdigit() else HPC_SSH_PORT
+    env_key_path = os.getenv("HPC_SSH_KEY_PATH", "").strip() or HPC_SSH_KEY_PATH
+
+    host = str(settings.get("ssh_host") or env_host or "").strip()
+    user = str(settings.get("ssh_user") or env_user or "ubuntu").strip()
+    raw_port = settings.get("ssh_port") or env_port or 22
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        port = 22
 
     key_candidates: List[Path] = []
-    if HPC_SSH_KEY_PATH:
-        key_candidates.append(Path(HPC_SSH_KEY_PATH).expanduser())
+    if env_key_path:
+        key_candidates.append(Path(env_key_path).expanduser())
     home = Path.home()
     key_candidates.extend(
         [
             home / ".ssh" / "id_ed25519",
             home / ".ssh" / "id_rsa",
             home / "Downloads" / "id_ed25519",
+            home / "Downloads" / "id_rsa",
         ]
     )
-    resolved_key: Optional[str] = None
+    resolved_keys: List[str] = []
+    seen_keys = set()
     for cand in key_candidates:
         try:
             if cand.is_file():
-                resolved_key = str(cand)
-                break
+                resolved = str(cand)
+                if resolved not in seen_keys:
+                    seen_keys.add(resolved)
+                    resolved_keys.append(resolved)
         except Exception:
             continue
 
@@ -66,7 +82,8 @@ def _resolve_ssh_connection() -> Dict[str, Any]:
         "host": host,
         "user": user,
         "port": port,
-        "key_path": resolved_key,
+        "key_path": resolved_keys[0] if resolved_keys else None,
+        "key_paths": resolved_keys,
     }
 
 
@@ -103,7 +120,7 @@ def execute_restricted_cluster_command(
     # Case 1: Running directly on Linux Head Node
     if cfg["is_linux_local"] and not cfg["host"]:
         try:
-            if target_node_ip in ("localhost", "127.0.0.1", "head-node"):
+            if target_node_ip in HEADNODE_TARGETS:
                 proc = subprocess.run(
                     command_args,
                     capture_output=True,
@@ -150,16 +167,18 @@ def execute_restricted_cluster_command(
             "-o",
             "StrictHostKeyChecking=accept-new",
             "-o",
-            "ConnectTimeout=4",
+            "ConnectTimeout=5",
             "-p",
             str(cfg["port"]),
         ]
-        if cfg["key_path"]:
-            ssh_base.extend(["-i", cfg["key_path"]])
+        if cfg["key_paths"]:
+            ssh_base.extend(["-o", "IdentitiesOnly=yes"])
+            for kp in cfg["key_paths"][:3]:
+                ssh_base.extend(["-i", kp])
 
         ssh_base.append(f"{cfg['user']}@{cfg['host']}")
 
-        if target_node_ip in ("localhost", "127.0.0.1", "head-node", cfg["host"]):
+        if target_node_ip in HEADNODE_TARGETS or target_node_ip == cfg["host"]:
             ssh_base.append(remote_cmd_str)
         else:
             # Hop from Head Node to internal compute node (10.100.0.x)

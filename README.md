@@ -24,18 +24,20 @@ The platform is intended to support HPC administrators and authorised team membe
 
 | Area | Description |
 |---|---|
-| Cluster Overview | Displays cluster health and operational indicators. |
-| Cluster Topology | Provides a visual representation of configured cluster nodes. |
-| Live Monitoring | Displays incoming telemetry and historical monitoring information. |
-| AI and Predictive Monitoring | Presents anomaly and failure-related scores from the configured ML engine. |
-| Job Management | Provides Slurm workload and job-management functionality. |
-| Node Diagnostics | Retrieves node logs and diagnostic information. |
-| Instance Terminal | Provides an authenticated, restricted terminal interface. |
-| Alerts and Incidents | Supports alert episode management and operational actions. |
-| Performance Analytics | Provides historical performance analysis. |
-| Reports | Supports report previews and data exports. |
-| Settings | Allows authorised administrators to configure supported services and monitoring settings. |
-| Authentication | Provides session-based authentication and role-based access control. |
+| Overview | Displays cluster health, Slurm job counts, and separate service status indicators. |
+| Infrastructure Topology | Visual representation of head node and compute nodes with multi-evidence health states. |
+| Node Monitoring | Detailed real-time node telemetry, comparison table, collector health, and CSV export. |
+| AI Model Centre | Separate monitoring, toggle controls, and evaluation of V7 Isolation Forest and LSTM V8. |
+| AI Intelligence Centre | Gemini LLM workspace for cluster chat, incident investigation, and NL analytics. |
+| Workload Intelligence | Slurm job queue, accounting history, node impact correlation, and safe controls. |
+| Node Logs & Diagnostics | Retrieves journald / node logs and cluster diagnostic bundles. |
+| Incidents & Alerts | Multi-source (telemetry, V7, LSTM V8) alert episodes, notes, and Gemini investigation links. |
+| Experiments & Evaluation | Labelled fault-injection and baseline windows to evaluate V7 vs LSTM V8 vs thresholds. |
+| Historical Analytics | Historical telemetry trends, node comparisons, and availability analysis. |
+| Reports | CSV, PDF, experiment evaluation, and Gemini AI operational report archive. |
+| System Settings | Integration endpoints, persistent model/terminal/email toggles, and JSON/SQLite backups. |
+| User Management | Role-based access control (`super_admin`, `admin`, `viewer`), invitations, and audit trail. |
+| Operations Terminal | Policy-gated, audited administrative console with command allowlists & secret redaction. |
 
 Some capabilities depend on external services, cluster connectivity, user permissions, and available model artefacts.
 
@@ -347,6 +349,13 @@ Start the backend:
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Backend environment variables (configured via `backend/.env` or shell environment, kept strictly backend-only):
+
+- `V7_API_URL`, `V7_API_KEY`, `V7_TIMEOUT` — cluster V7 Isolation Forest API (`GET /scores/latest`)
+- `LSTM_V8_API_URL`, `LSTM_V8_API_KEY`, `LSTM_V8_TIMEOUT` — cluster LSTM V8 temporal forecaster API
+- `GEMINI_API_KEY`, `GEMINI_MODEL` — Google Gemini LLM API for AI Intelligence & report generation
+- `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME` — optional P1 incident email & OTP delivery
+
 ### Frontend Setup
 
 Open another terminal:
@@ -426,11 +435,15 @@ Database tables include:
 - `system_logs`
 - `telemetry_history`
 - `app_settings`
-- `users`
-- `sessions`
-- `auth_events`
-- `invitations`
-- `ml_engine_settings`
+- `ai_reports`
+- `model_score_observations`
+- `experiments`
+- `gemini_conversations`
+- `terminal_audit_logs`
+- `auth_users`
+- `auth_sessions`
+- `auth_invitations`
+- `auth_audit_logs`
 
 Prometheus remains responsible for infrastructure metrics collection and querying.
 
@@ -450,7 +463,8 @@ Backend tests cover areas including:
 Run relevant backend tests using the configured Python environment:
 
 ```bash
-python -m pytest backend/
+cd backend
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 For frontend build verification:

@@ -8,6 +8,7 @@ import {
   Layers,
   Network,
   RefreshCw,
+  Download, CheckCircle2,
 } from 'lucide-react';
 import {
   Area,
@@ -113,10 +114,8 @@ export default function LiveMonitoringPage({
           </div>
           <div>
             <h2 className="text-xl font-bold tracking-tight">Live Monitoring</h2>
-            <p className="text-xs spu-text-secondary">
-              Detailed real-time Node Exporter metrics • Source:{' '}
-              <span className="font-mono">{rangeSource}</span>
-            </p>
+           
+           
           </div>
         </div>
 
@@ -145,6 +144,14 @@ export default function LiveMonitoringPage({
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loadingRange ? 'animate-spin' : ''}`} />
           </button>
+          <a
+            href={api.getMonitoringExportUrl(rangeKey, activeNode?.node_id)}
+            className="spu-btn-secondary inline-flex items-center gap-1.5 text-xs"
+            title="Export telemetry CSV for current window"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export CSV
+          </a>
         </div>
       </div>
 
@@ -246,19 +253,25 @@ export default function LiveMonitoringPage({
         })}
       </section>
 
-      {/* Linux PSI Pressure Stall Strip */}
-      <section className="spu-card p-4">
+      {/* Telemetry Freshness, Collector Health & Linux Kernel PSI */}
+      <section className="spu-card p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-xs font-bold uppercase tracking-wider">
-              Linux Kernel Pressure Stall Information (PSI) &amp; Thermal Sensor
+              Linux Kernel Pressure Stalls (PSI), Packet Drops &amp; Collector Health
             </h3>
             <p className="text-[11px] spu-text-secondary">
-              CPU, memory and I/O stall percentages from <code className="font-mono">node_pressure_*</code>
+               <code className="font-mono"></code> • Last update:{' '}
+              <span className="font-mono">
+                {activeNode.last_telemetry_utc
+                  ? `${activeNode.last_telemetry_utc.slice(0, 19).replace('T', ' ')}Z`
+                  : 'Unavailable'}
+              </span>{' '}
+              {activeNode.telemetry_age_seconds != null && `(${Math.round(activeNode.telemetry_age_seconds)}s ago)`}
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 text-xs">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 text-xs">
             <div className="spu-subcard px-3 py-2">
               <span className="spu-text-muted block text-[10px]">CPU Pressure</span>
               <strong className="font-mono">{fmtVal(activeNode.psi_cpu_percent, '%', 2)}</strong>
@@ -272,13 +285,18 @@ export default function LiveMonitoringPage({
               <strong className="font-mono">{fmtVal(activeNode.psi_io_percent, '%', 2)}</strong>
             </div>
             <div className="spu-subcard px-3 py-2">
-              <span className="spu-text-muted block text-[10px]">CPU Package Temp</span>
-              <strong className="font-mono">
-                {fmtVal(activeNode.cpu_temperature_celsius, ' °C', 1)}
+              <span className="spu-text-muted block text-[10px]">Net Packet Drops</span>
+              <strong className="font-mono">{fmtVal(activeNode.network_drop_per_second, '/s', 3)}</strong>
+            </div>
+            <div className="spu-subcard px-3 py-2">
+              <span className="spu-text-muted block text-[10px]">Scrape Collector</span>
+              <strong className={`font-mono ${activeNode.up === 1 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {activeNode.up === 1 ? 'UP' : 'SCRAPE DOWN'}
               </strong>
             </div>
           </div>
         </div>
+        
       </section>
 
       {/* 4 Synchronized Time-Series Charts */}
@@ -463,6 +481,75 @@ export default function LiveMonitoringPage({
               </LineChart>
             </ResponsiveContainer>
           </div>
+        </div>
+      </section>
+
+      {/* Multi-Node Side-by-Side Comparison */}
+      <section className="spu-card p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-xs font-bold uppercase tracking-wider">
+              Cluster Node Metric Comparison
+            </h3>
+            
+          </div>
+          <a
+            href={api.getMonitoringExportUrl(rangeKey, null)}
+            className="text-xs font-semibold text-[var(--accent-cyan)] hover:underline"
+          >
+            Export All Nodes CSV ({rangeKey})
+          </a>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs font-mono">
+            <thead>
+              <tr className="border-b spu-border text-[10px] uppercase spu-text-muted">
+                <th className="py-2 pr-3 font-sans">Node</th>
+                <th className="py-2 px-2">Scrape</th>
+                <th className="py-2 px-2">Health</th>
+                <th className="py-2 px-2">CPU %</th>
+                <th className="py-2 px-2">I/O Wait %</th>
+                <th className="py-2 px-2">Mem %</th>
+                <th className="py-2 px-2">Load1</th>
+                <th className="py-2 px-2">Net Err/s</th>
+                <th className="py-2 px-2">V7</th>
+                <th className="py-2 pl-2">LSTM V8</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y spu-border">
+              {nodes.map((n) => {
+                const isSel = n.node_id === activeNode.node_id;
+                return (
+                  <tr
+                    key={n.node_id}
+                    onClick={() => onSelectNode(n.node_id)}
+                    className={`cursor-pointer transition hover:bg-[var(--bg-hover)] ${
+                      isSel ? 'bg-cyan-500/8' : ''
+                    }`}
+                  >
+                    <td className="py-2 pr-3 font-sans font-semibold">{n.display_name || n.node_id}</td>
+                    <td className={`py-2 px-2 ${n.up === 1 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {n.up === 1 ? 'OK' : 'DOWN'}
+                    </td>
+                    <td className="py-2 px-2">{n.health_status || (n.up === 1 ? 'healthy' : 'offline')}</td>
+                    <td className="py-2 px-2">{fmtVal(n.cpu_utilization_percent, '%', 1)}</td>
+                    <td className="py-2 px-2">{fmtVal(n.cpu_iowait_percent, '%', 1)}</td>
+                    <td className="py-2 px-2">{fmtVal(n.memory_used_percent, '%', 1)}</td>
+                    <td className="py-2 px-2">{n.load1 ?? '--'}</td>
+                    <td className="py-2 px-2">{fmtVal(n.network_errors_per_second, '', 3)}</td>
+                    <td className="py-2 px-2">
+                      {n.v7_detection?.anomaly_score != null
+                        ? `${n.v7_detection.anomaly_score.toFixed(3)} (${n.v7_detection.is_anomaly ? 'ANOM' : 'OK'})`
+                        : '--'}
+                    </td>
+                    <td className="py-2 pl-2">
+                      {n.lstm_v8_status?.latest_warning?.status || '--'}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </section>
     </div>

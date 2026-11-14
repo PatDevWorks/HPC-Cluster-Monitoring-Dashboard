@@ -55,29 +55,25 @@ LIVE_CLUSTER_NODES = [
         "node_id": "head-node",
         "display_name": "Head Node",
         "instance": "127.0.0.1:9100",
-        "ip": "10.100.0.198",
+        "ip": "127.0.0.1",
         "ssh_target": "localhost",
         "role": "management",
         "rack_id": "rack-0",
-        "cpu_model": "Intel Xeon-Silver 4514Y",
-        "cpu_cores": 16,
-        "memory_gib": 32,
-        "psu_watts": 500,
-        "peak_draw_watts": 190,
+        "cpu_model": "x86_64 Server Processor",
+        "cpu_cores": 8,
+        "memory_gib": 16,
     },
     {
         "node_id": "compute-01",
         "display_name": "Compute-001",
-        "instance": "10.100.0.66:9100",
-        "ip": "10.100.0.66",
-        "ssh_target": "10.100.0.66",
+        "instance": "10.100.0.198:9100",
+        "ip": "10.100.0.198",
+        "ssh_target": "10.100.0.198",
         "role": "compute",
         "rack_id": "rack-1",
-        "cpu_model": "Intel Xeon-Gold 5412Y",
-        "cpu_cores": 24,
-        "memory_gib": 64,
-        "psu_watts": 800,
-        "peak_draw_watts": 325,
+        "cpu_model": "x86_64 Compute Node",
+        "cpu_cores": 8,
+        "memory_gib": 16,
     },
     {
         "node_id": "compute-02",
@@ -87,56 +83,52 @@ LIVE_CLUSTER_NODES = [
         "ssh_target": "10.100.0.167",
         "role": "compute",
         "rack_id": "rack-1",
-        "cpu_model": "Intel Xeon-Gold 5412Y",
-        "cpu_cores": 24,
-        "memory_gib": 64,
-        "psu_watts": 800,
-        "peak_draw_watts": 325,
+        "cpu_model": "x86_64 Compute Node",
+        "cpu_cores": 8,
+        "memory_gib": 16,
     },
     {
         "node_id": "compute-03",
         "display_name": "Compute-003",
-        "instance": "10.100.0.198:9100",
-        "ip": "10.100.0.198",
-        "ssh_target": "10.100.0.198",
+        "instance": "10.100.0.66:9100",
+        "ip": "10.100.0.66",
+        "ssh_target": "10.100.0.66",
         "role": "compute",
         "rack_id": "rack-1",
-        "cpu_model": "Intel Xeon-Gold 5412Y",
-        "cpu_cores": 24,
-        "memory_gib": 64,
-        "psu_watts": 800,
-        "peak_draw_watts": 325,
+        "cpu_model": "x86_64 Compute Node",
+        "cpu_cores": 8,
+        "memory_gib": 16,
     },
 ]
 
-# Unsupervised 10-feature baseline contract from Modelling_Predictive_HPC_Cleaned.ipynb
-UNSUPERVISED_BASE_FEATURES = [
-    "cpu_utilization_percent",
-    "cpu_iowait_percent",
-    "load1",
-    "load5",
-    "load15",
-    "memory_used_percent",
-    "disk_read_bytes_per_second",
-    "disk_write_bytes_per_second",
-    "network_receive_bytes_per_second",
-    "network_transmit_bytes_per_second",
-]
+# V7 Isolation Forest cluster API integration (credentials stay backend-only)
+V7_API_URL = os.getenv("V7_API_URL", "").strip()
+V7_API_KEY = os.getenv("V7_API_KEY", "").strip()
+V7_TIMEOUT = float(os.getenv("V7_TIMEOUT", "5.0"))
 
-# Default Smart Priority, Resource Threshold & Persistence Alert Policy
+# LSTM V8 cluster API integration (credentials stay backend-only)
+LSTM_V8_API_URL = os.getenv("LSTM_V8_API_URL", "").strip()
+LSTM_V8_API_KEY = os.getenv("LSTM_V8_API_KEY", "").strip()
+LSTM_V8_TIMEOUT = float(os.getenv("LSTM_V8_TIMEOUT", "5.0"))
+
+# Operational telemetry & detection alert policy defaults
+# Note: Hardware sensors (temperature, fan speed, power/energy) are not exposed via
+# cluster hwmon interfaces and are intentionally excluded from alert thresholds.
 ALERT_POLICY = {
-    "p3_watch_prob": 0.015,           # Validated >=94% event-recall threshold from notebook
-    "p2_warning_prob": 0.18,          # Elevated 1h failure probability
-    "p1_critical_prob": 0.40,         # High-confidence impending failure threshold
-    "persistence_p1_p3": 2,           # 2-of-2 consecutive observations required
-    "persistence_p2_anomaly": 3,      # 3-of-3 consecutive observations for pure unsupervised alerts
-    "cooldown_minutes": 30,           # 30-minute repeat alert suppression (STUDENT_GUIDE Sec 5)
-    "scratch_critical_percent": 90.0, # Shared /scratch pool critical threshold
-    "cpu_warning_percent": 95.0,      # Sustained CPU saturation warning threshold
-    "memory_warning_percent": 88.0,   # Memory threshold violation warning
-    "memory_critical_percent": 95.0,  # Memory threshold violation critical
-    "temp_warning_celsius": 78.0,     # Package thermal warning threshold
-    "temp_critical_celsius": 86.0,    # Package thermal critical threshold
+    "cpu_warning_percent": 95.0,        # Sustained CPU saturation warning threshold
+    "iowait_warning_percent": 35.0,     # Sustained storage wait warning threshold
+    "memory_warning_percent": 88.0,     # Memory usage warning threshold
+    "memory_critical_percent": 95.0,    # Memory exhaustion critical threshold
+    "scratch_critical_percent": 90.0,   # Shared /scratch pool critical threshold
+    "root_critical_percent": 90.0,      # Root filesystem critical threshold
+    "normalized_load_warning": 1.25,    # Load1 / CPU cores sustained warning
+    "net_error_warning_per_sec": 1.0,   # Interface RX/TX error rate warning
+    "mpi_straggler_warning": 0.45,      # Peer CPU/network asymmetry threshold
+    "persistence_ticks": 2,             # Consecutive observations before raising episode
+    "cooldown_minutes": 30,             # Repeat alert suppression window
+    "stale_telemetry_seconds": 120,     # Age at which node telemetry is marked stale
+    "enable_v7_alerts": True,           # Raise incident when V7 anomaly exceeds threshold
+    "enable_lstm_alerts": True,         # Raise incident when LSTM V8 warning fires
 }
 
 APP_METADATA = {

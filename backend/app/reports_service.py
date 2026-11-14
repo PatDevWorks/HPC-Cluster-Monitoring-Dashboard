@@ -8,6 +8,7 @@ from .database import (
     list_slurm_audit,
     query_telemetry_history,
 )
+from .evaluation_service import compute_model_comparison_summary
 
 
 def build_report_data(
@@ -19,33 +20,33 @@ def build_report_data(
     nodes = snapshot.get("nodes", [])
     kpis = snapshot.get("kpis", {})
 
-    if report_type == "ai_predictions":
-        title = "AI Failure Predictions & Anomaly Detection Report"
+    if report_type in ("ai_predictions", "model_status"):
+        title = "AI Model Status Report (V7 Isolation Forest & LSTM V8)"
         columns = [
             "Node",
             "Role",
-            "Health Score %",
-            "1h Failure Prob %",
-            "6h Failure Prob %",
-            "Anomaly Score %",
-            "Consensus Votes",
-            "Classification",
-            "Prediction Source",
+            "Operational Status",
+            "V7 Anomaly Score",
+            "V7 Threshold",
+            "V7 Status",
+            "LSTM Warning Score",
+            "LSTM Status",
         ]
-        rows = [
-            [
+        rows = []
+        for n in nodes:
+            v7 = n.get("v7_detection") or {}
+            lstm = n.get("lstm_v8_status") or {}
+            lw = lstm.get("latest_warning") or {}
+            rows.append([
                 n.get("display_name") or n.get("node_id"),
                 n.get("role", ""),
-                f"{n.get('node_health_score', 0):.1f}",
-                f"{(n.get('failure_prob_1h', 0) * 100):.2f}",
-                f"{(n.get('failure_prob_6h', 0) * 100):.2f}",
-                f"{(n.get('anomaly_score', 0) * 100):.2f}",
-                f"{n.get('consensus_count', 0)}/4",
-                n.get("fault_label", "Healthy"),
-                n.get("prediction_source", ""),
-            ]
-            for n in nodes
-        ]
+                n.get("health_classification", n.get("health_status", "Healthy")),
+                _fmt_num(v7.get("anomaly_score"), 4),
+                _fmt_num(v7.get("threshold"), 4),
+                str(v7.get("status", "disabled" if not v7 else "ok")),
+                _fmt_num(lw.get("warning_score"), 4),
+                str(lw.get("status", "unavailable" if not lstm else "ok")),
+            ])
     elif report_type == "alerts_incidents":
         title = "Cluster Alerts & Incident History Report"
         episodes = list_episodes(limit=150)
@@ -53,10 +54,11 @@ def build_report_data(
             "ID",
             "Severity",
             "Priority",
+            "Source",
             "Status",
             "Node",
-            "Fault Class",
-            "Peak 1h Risk %",
+            "Event Type",
+            "Points",
             "Start UTC",
             "Last Seen UTC",
         ]
@@ -65,10 +67,11 @@ def build_report_data(
                 str(e.get("id")),
                 str(e.get("severity", "")).upper(),
                 str(e.get("priority", "")),
+                str(e.get("alert_source", "telemetry")),
                 str(e.get("status", "")),
                 str(e.get("node_id", "")),
-                str(e.get("fault_class", "")),
-                f"{(float(e.get('max_failure_prob', 0)) * 100):.1f}",
+                str(e.get("event_type", e.get("fault_class", ""))),
+                str(e.get("alert_points", 1)),
                 str(e.get("start_utc", "")),
                 str(e.get("last_seen_utc", "")),
             ]
@@ -113,6 +116,42 @@ def build_report_data(
             ]
             for a in audit
         ]
+    elif report_type == "experiment_evaluation":
+        title = "Experiment & Model Comparison Evaluation Report (V7 vs LSTM V8 vs Thresholds)"
+        ev = compute_model_comparison_summary()
+        columns = [
+            "Experiment ID",
+            "Name",
+            "Category",
+            "Node",
+            "Label",
+            "Workload",
+            "V7 Detected",
+            "V7 Delay (min)",
+            "LSTM V8 Detected",
+            "LSTM Delay (min)",
+            "Telemetry Detected",
+            "Telemetry Delay (min)",
+        ]
+        rows = [
+            [
+                str(r.get("id", "")),
+                str(r.get("name", "")),
+                str(r.get("category", "")),
+                str(r.get("node_id", "")),
+                str(r.get("label", "")),
+                str(r.get("workload_condition", "")),
+                "Yes" if r.get("v7_detected") else "No",
+                str(r.get("v7_delay_min")) if r.get("v7_delay_min") is not None else "-",
+                "Yes" if r.get("lstm_v8_detected") else "No",
+                str(r.get("lstm_delay_min")) if r.get("lstm_delay_min") is not None else "-",
+                "Yes" if r.get("telemetry_detected") else "No",
+                str(r.get("telemetry_delay_min")) if r.get("telemetry_delay_min") is not None else "-",
+            ]
+            for r in ev.get("experiment_results", [])
+        ]
+        summary["evaluation_summary"] = ev.get("detector_evaluation", {})
+        summary["experiments_total"] = ev.get("experiments_total", 0)
     elif report_type == "performance_history":
         title = f"Historical Performance & Telemetry Report ({range_minutes}m Window)"
         hist = query_telemetry_history(range_minutes=range_minutes, limit=600)
@@ -120,31 +159,26 @@ def build_report_data(
             "Timestamp UTC",
             "Node",
             "Up",
-            "Health %",
             "CPU %",
             "IOWait %",
             "Memory %",
             "Load1",
             "Disk Write MB/s",
             "Net RX MB/s",
-            "1h Risk %",
+            "Disk IO %",
         ]
         rows = [
             [
                 str(h.get("timestamp_utc", "")),
                 str(h.get("node_id", "")),
-                str(h.get("up", 1)),
-                _fmt_num(h.get("health_score"), 1),
+                "ONLINE" if h.get("up", 1) == 1 else "OFFLINE",
                 _fmt_num(h.get("cpu_percent"), 1),
                 _fmt_num(h.get("iowait_percent"), 2),
                 _fmt_num(h.get("memory_percent"), 1),
                 _fmt_num(h.get("load1"), 2),
                 _fmt_num(h.get("disk_write_mb"), 2),
                 _fmt_num(h.get("net_rx_mb"), 2),
-                _fmt_num(
-                    float(h["failure_prob_1h"]) * 100.0 if h.get("failure_prob_1h") is not None else None,
-                    2,
-                ),
+                _fmt_num(h.get("disk_io_percent"), 1),
             ]
             for h in hist
         ]
@@ -156,12 +190,12 @@ def build_report_data(
             "Role",
             "Online",
             "Slurm State",
-            "Health %",
+            "Status",
             "CPU %",
             "Memory %",
             "Load1",
             "Scratch %",
-            "1h Risk %",
+            "Alert Priority",
         ]
         rows = [
             [
@@ -170,12 +204,12 @@ def build_report_data(
                 str(n.get("role", "")),
                 "ONLINE" if n.get("up") == 1 else "OFFLINE",
                 str(n.get("slurm_state", "")),
-                _fmt_num(n.get("node_health_score"), 1),
+                str(n.get("health_classification", n.get("health_status", "Healthy"))),
                 _fmt_num(n.get("cpu_utilization_percent"), 1),
                 _fmt_num(n.get("memory_used_percent"), 1),
                 _fmt_num(n.get("load1"), 2),
                 _fmt_num(n.get("scratch_used_percent"), 1),
-                f"{(float(n.get('failure_prob_1h') or 0.0) * 100):.2f}",
+                str(n.get("alert_priority", "OK")),
             ]
             for n in nodes
         ]
@@ -183,12 +217,10 @@ def build_report_data(
     summary_metrics = {
         "generated_utc": now_iso,
         "data_source": snapshot.get("mode_label", snapshot.get("mode", "")),
-        "cluster_health_score": kpis.get("cluster_health_score", 100),
-        "cluster_status": kpis.get("cluster_health_label", "Healthy"),
+        "cluster_status": kpis.get("cluster_status_label", "Healthy"),
         "nodes_online": f"{kpis.get('nodes_online', 0)}/{kpis.get('nodes_total', 0)}",
         "cluster_cpu_percent": kpis.get("cluster_cpu_percent"),
         "cluster_memory_percent": kpis.get("cluster_memory_percent"),
-        "peak_failure_prob_pct": kpis.get("peak_failure_prob_pct", 0.0),
         "active_alerts": kpis.get("active_episodes_total", 0),
     }
 
@@ -213,10 +245,10 @@ def export_report_csv(report_payload: Dict[str, Any]) -> Tuple[bytes, str]:
         [
             "# Summary",
             f"Nodes={summary.get('nodes_online')}",
-            f"Health={summary.get('cluster_health_score')}%",
+            f"Status={summary.get('cluster_status')}",
             f"CPU={summary.get('cluster_cpu_percent')}%",
             f"Mem={summary.get('cluster_memory_percent')}%",
-            f"Peak1hRisk={summary.get('peak_failure_prob_pct')}%",
+            f"ActiveAlerts={summary.get('active_alerts')}",
         ]
     )
     writer.writerow([])
@@ -269,11 +301,11 @@ def export_report_pdf(report_payload: Dict[str, Any]) -> Tuple[bytes, str]:
         title=title,
         subtitle=f"Sol Plaatje University | Generated {gen_ts} | Source: {_pdf_escape(str(summary.get('data_source', '')))}",
         kpi_line=(
-            f"Cluster Health: {summary.get('cluster_health_score')}% ({summary.get('cluster_status')})   |   "
+            f"Cluster Status: {summary.get('cluster_status')}   |   "
             f"Nodes Online: {summary.get('nodes_online')}   |   "
             f"CPU: {summary.get('cluster_cpu_percent')}%   |   "
             f"Memory: {summary.get('cluster_memory_percent')}%   |   "
-            f"Peak 1h AI Risk: {summary.get('peak_failure_prob_pct')}%"
+            f"Active Alerts: {summary.get('active_alerts')}"
         ),
         table_header=header_line,
         table_sep=sep_line,

@@ -365,22 +365,35 @@ def _render_builtin_or_emulated(
     if binary == "help":
         return _render_help_text()
     if binary == "status":
+        v7 = node.get("v7_detection") or {}
+        lstm = node.get("lstm_v8_status") or {}
+        v7_str = (
+            f"score={v7.get('anomaly_score'):.4f} (thr={v7.get('threshold')}, anom={v7.get('is_anomaly')})"
+            if isinstance(v7.get("anomaly_score"), (int, float))
+            else str(v7.get("status", "not_configured"))
+        )
+        lstm_warn = lstm.get("latest_warning") or {}
+        lstm_str = (
+            f"warn={lstm_warn.get('is_warning')} (score={lstm_warn.get('warning_score')})"
+            if lstm_warn
+            else ("pending" if lstm else "unavailable")
+        )
         return (
             f"Instance       : {node.get('display_name') or nid} ({nid})\n"
             f"IP / Exporter  : {ip} ({node.get('instance', 'n/a')})\n"
             f"Availability   : {'ONLINE' if node.get('up') == 1 else 'OFFLINE'} | Slurm: {node.get('slurm_state', 'IDLE')}\n"
-            f"Health Score   : {node.get('node_health_score', '--')}% ({node.get('health_classification', 'Healthy')})\n"
+            f"Operational    : {node.get('health_classification', 'Healthy')} ({node.get('health_status', 'healthy')}) | Alert: {node.get('alert_priority', 'OK')}\n"
             f"CPU / I/O Wait : {cpu_pct:.1f}% / {iowait_pct:.1f}%  (Load: {load1:.2f}, {load5:.2f}, {load15:.2f})\n"
             f"Memory / Swap  : {mem_pct:.1f}% of {mem_gib:.0f} GiB / Swap {swap_pct:.1f}%\n"
             f"Filesystems    : Root / {root_pct:.1f}% | /scratch {scratch_pct:.1f}%\n"
-            f"AI Risk (1h)   : {(float(node.get('failure_prob_1h') or 0.0) * 100):.2f}% | Anomaly: {(float(node.get('anomaly_score') or 0.0) * 100):.1f}% ({node.get('consensus_count', 0)}/4 votes)"
+            f"V7 IF / LSTMV8 : V7[{v7_str}] | LSTM[{lstm_str}]"
         )
     if binary == "nodes":
-        lines = ["NODE_ID        ROLE         IP              SLURM       HEALTH   CPU%    MEM%"]
+        lines = ["NODE_ID        ROLE         IP              SLURM       STATUS      CPU%    MEM%"]
         for n in all_nodes:
             lines.append(
                 f"{str(n.get('node_id', '')):<14} {str(n.get('role', '')):<12} {str(n.get('ip', '')):<15} "
-                f"{str(n.get('slurm_state', '')):<11} {str(n.get('node_health_score', '--')):>5}%  "
+                f"{str(n.get('slurm_state', '')):<11} {str(n.get('health_status', 'healthy')):<11} "
                 f"{str(n.get('cpu_utilization_percent', '--')):>5}%  {str(n.get('memory_used_percent', '--')):>5}%"
             )
         return "\n".join(lines)
@@ -519,7 +532,7 @@ def _render_builtin_or_emulated(
         return (
             f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} {nid} kernel: [  0.000000] Linux version 6.8.0-48-generic (Ubuntu 24.04)\n"
             f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} {nid} node_exporter[912]: Listening on :9100\n"
-            f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} {nid} aiops-agent[1204]: Health={node.get('node_health_score', 100)}% Slurm={node.get('slurm_state', 'IDLE')}"
+            f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} {nid} aiops-agent[1204]: Status={node.get('health_status', 'healthy')} Slurm={node.get('slurm_state', 'IDLE')}"
         )
 
     return f"[{nid}] Executed '{' '.join(argv)}' (simulated telemetry mode — configure SSH in Settings for live host shell)."
