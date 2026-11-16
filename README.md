@@ -131,7 +131,7 @@ flowchart TD
     J --> K[React Dashboard]
 ```
 
-For further details, see [Architecture Documentation](docs/ARCHITECTURE.md).
+For an as-built architecture overview, see [System Overview and Requirements](docs/SYSTEM_OVERVIEW_REQUIREMENTS.md).
 
 ## 5. Repository Structure
 
@@ -274,7 +274,7 @@ The V6 integration is an inference client, not a complete real-time model traini
 
 The longer-term development objective is to establish a validated real-time data collection, training, evaluation, model versioning, and deployment workflow.
 
-For further details, see [Machine Learning Documentation](docs/MACHINE_LEARNING.md).
+The [System Overview and Requirements](docs/SYSTEM_OVERVIEW_REQUIREMENTS.md) describes the current pipeline and its integration boundaries.
 
 ## 8. Authentication and Security
 
@@ -302,7 +302,7 @@ Sensitive operations, including selected Slurm actions, terminal execution, and 
 
 Invitation-based registration and configurable email-domain approval should not be considered operational until their complete workflows have been implemented and verified.
 
-See [Authentication Documentation](docs/AUTHENTICATION.md).
+Authentication configuration and deployment checks are covered in [Deployment Guide](docs/DEPLOYMENT.md).
 
 ## 9. Installation and Local Development
 
@@ -376,11 +376,11 @@ Backend:
 
 `http://localhost:8000`
 
-For complete setup instructions, see [Installation Documentation](docs/INSTALLATION.md).
+For head-node deployment, see the [Deployment Guide](docs/DEPLOYMENT.md).
 
 ## 10. Deployment
 
-The repository includes deployment support for local development and Linux head-node environments.
+The repository includes scripts for local development and a baseline Linux head-node deployment.
 
 ### Windows Development
 
@@ -388,17 +388,17 @@ The `start-dashboard.ps1` script automates local startup of the frontend and bac
 
 ### Linux Head-Node Deployment
 
-The `deploy-headnode.sh` script provides a baseline Linux deployment process, including:
+The `deploy-headnode.sh` script builds the frontend, installs backend dependencies, and creates and starts a systemd service. It does not configure HTTPS, reverse proxying, firewall rules, secrets, or database backups.
+
+Before using it on a shared host, review the service account and configure production authentication secrets, secure cookies, TLS, network restrictions, and database backups. Follow the [Deployment Guide](docs/DEPLOYMENT.md).
+
+The baseline script performs these steps:
 
 - Frontend production build.
 - Python virtual environment setup.
 - Backend dependency installation.
 - systemd service configuration.
 - Automatic service startup.
-
-A hardened production environment additionally requires appropriate HTTPS, reverse-proxy, firewall, secrets-management, backup, and access-control configuration.
-
-See [Deployment Documentation](docs/DEPLOYMENT.md).
 
 ## 11. API and Integration
 
@@ -422,7 +422,7 @@ The live monitoring WebSocket endpoint is:
 
 `/ws/live`
 
-For the available endpoint inventory, see [API Reference](docs/API_REFERENCE.md).
+FastAPI's interactive API documentation is available at `/docs` when the service is running.
 
 ## 12. Database and Persistence
 
@@ -474,22 +474,16 @@ cd frontend
 npm run build
 ```
 
-Refer to [Contributing Documentation](docs/CONTRIBUTING.md) for development practices and testing guidance.
+Use the verification commands above after making changes, and review the relevant deployment and system overview documents before a release.
 
 ## 14. Project Documentation
 
-The complete project documentation is available in the `docs/` directory.
+The current project documents are:
 
 | Document | Description |
 |---|---|
-| [Architecture](docs/ARCHITECTURE.md) | System architecture, components, and telemetry flow. |
-| [Installation](docs/INSTALLATION.md) | Development environment setup and installation instructions. |
-| [Authentication](docs/AUTHENTICATION.md) | Authentication, sessions, security, and role-based access. |
-| [Machine Learning](docs/MACHINE_LEARNING.md) | Machine-learning architecture, feature engineering, and predictive monitoring. |
-| [Deployment](docs/DEPLOYMENT.md) | Local and Linux head-node deployment instructions. |
-| [API Reference](docs/API_REFERENCE.md) | Backend API endpoints and WebSocket interface. |
-| [Contributing](docs/CONTRIBUTING.md) | Development workflow, testing, and contribution guidelines. |
-| [Operations](docs/OPERATIONS.md) | Troubleshooting, maintenance, and operational procedures. |
+| [System Overview and Requirements](docs/SYSTEM_OVERVIEW_REQUIREMENTS.md) | As-built architecture, data flow, integrations, and requirements. |
+| [Deployment Guide](docs/DEPLOYMENT.md) | Linux head-node deployment, security configuration, and production checks. |
 
 ## 15. Current Development Status
 
