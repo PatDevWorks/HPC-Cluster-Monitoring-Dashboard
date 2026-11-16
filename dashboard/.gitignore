@@ -1,0 +1,54 @@
+# Environment variables and secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# Logs and generated files
+*.log
+coverage/
+.DS_Store
+Thumbs.db
+
+# Local databases and SQLite files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Old integration backups
+integration-backup-*/
+
+# Temporary files
+*.tmp
+*.bak
+*.old
+
+# Additional publishing exclusions
+dist/
+*.backup
+backend/env
+backend/backend/
+integration-backup-*/
+
+# Unreviewed temporary files
+/collected_code.txt
+/dbdb
+/ToggleML.txt
+
+# Local model directory - not part of this dashboard publication
+/V7 model/

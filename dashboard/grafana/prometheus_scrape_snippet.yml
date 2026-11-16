@@ -1,0 +1,7 @@
+# Add this job block under `scrape_configs:` in /etc/prometheus/prometheus.yml on your Head Node
+# so Prometheus scrapes the AI predictions from FastAPI (:8000/metrics) alongside node_exporter (:9100).
+
+  - job_name: "sol_plaatje_aiops_scoring"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["localhost:8000"]
