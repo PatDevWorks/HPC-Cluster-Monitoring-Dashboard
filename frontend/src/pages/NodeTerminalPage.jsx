@@ -72,7 +72,7 @@ export default function NodeTerminalPage({
             type: 'banner',
             timestamp: nowTime,
             output:
-              `Sol Plaatje A Dev Cluster Dashboard — Instance Console (${activeNode.display_name || activeNode.node_id})\n` +
+              `HPC Predictive Monitoring Dashboard — Instance Console (${activeNode.display_name || activeNode.node_id})\n` +
               `Host IP: ${activeNode.ip} | Role: ${activeNode.role} | Slurm: ${activeNode.slurm_state} | Status: ${activeNode.health_classification || activeNode.health_status || 'Healthy'}\n` +
               `Type 'help' to list permitted diagnostic commands, 'status' for live telemetry, or select a Quick Command.`,
           },

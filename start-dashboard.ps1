@@ -118,8 +118,41 @@ function Stop-ProcessTree([int]$ProcessId) {
     }
 }
 
+function Repair-SshPrivateKeyAcl([string]$KeyPath) {
+    if (-not $KeyPath -or -not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) { return $false }
+    $resolvedPath = (Resolve-Path -LiteralPath $KeyPath).Path
+    $currentAccount = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try {
+        # OpenSSH rejects private keys readable by inherited groups such as CodexSandboxUsers.
+        # Remove inherited and explicit ACEs, then grant read access only to this account.
+        $acl = Get-Acl -LiteralPath $resolvedPath
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($rule) }
+        $account = [System.Security.Principal.NTAccount]::new($currentAccount)
+        $readRule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $account,
+            [System.Security.AccessControl.FileSystemRights]::Read,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.AddAccessRule($readRule)
+        Set-Acl -LiteralPath $resolvedPath -AclObject $acl
+        Write-Host "      [OK] SSH private key permissions restricted to $currentAccount." -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "      [WARN] Could not repair SSH key permissions: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+function ConvertTo-ProcessArgument([string]$Value) {
+    if ($Value -match '\s|"') {
+        return '"' + $Value.Replace('"', '\"') + '"'
+    }
+    return $Value
+}
+
 Write-Host "=====================================================" -ForegroundColor Cyan
-Write-Host "  HPC AI Operations Dashboard - Unified Launcher" -ForegroundColor Cyan
+Write-Host "  HPC Predictive Monitoring Dashboard - Unified Launcher" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
 
 if (-not (Test-Path $VenvPython)) {
@@ -183,6 +216,7 @@ if (-not $ResolvedSshKey) {
     ) | Where-Object { Test-Path $_ }
     if ($ResolvedSshHost -and $keyCandidates.Count -gt 1) {
         foreach ($cand in $keyCandidates) {
+            [void](Repair-SshPrivateKeyAcl $cand)
             & ssh -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -p $ResolvedSshPort -i $cand "${ResolvedSshUser}@${ResolvedSshHost}" "true" 2>$null
             if ($LASTEXITCODE -eq 0) {
                 $ResolvedSshKey = $cand
@@ -193,6 +227,10 @@ if (-not $ResolvedSshKey) {
     if (-not $ResolvedSshKey -and $keyCandidates.Count -gt 0) {
         $ResolvedSshKey = $keyCandidates[0]
     }
+}
+if ($ResolvedSshHost -and $ResolvedSshKey -and (Test-Path -LiteralPath $ResolvedSshKey -PathType Leaf)) {
+    $ResolvedSshKey = (Resolve-Path -LiteralPath $ResolvedSshKey).Path
+    [void](Repair-SshPrivateKeyAcl $ResolvedSshKey)
 }
 
 $TunnelProc = $null
@@ -289,7 +327,8 @@ echo "PROM=$PROM V7=$V7 LSTM=$LSTM SLURM=$SLURM"
             $tunnelArgs += $sshTarget
 
             Write-Host "      Starting unified SSH tunnel for ports: $($ForwardPorts -join ', ')..." -ForegroundColor Cyan
-            $TunnelProc = Start-Process -FilePath "ssh" -ArgumentList $tunnelArgs -WindowStyle Hidden -PassThru
+            $quotedTunnelArgs = @($tunnelArgs | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) -join ' '
+            $TunnelProc = Start-Process -FilePath "ssh" -ArgumentList $quotedTunnelArgs -WindowStyle Hidden -PassThru
 
             $deadline = (Get-Date).AddSeconds(10)
             while ((Get-Date) -lt $deadline) {

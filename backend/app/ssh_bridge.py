@@ -42,12 +42,15 @@ def _resolve_ssh_connection() -> Dict[str, Any]:
     env_host = os.getenv("HPC_SSH_HOST", "").strip() or HPC_SSH_HOST
     env_user = os.getenv("HPC_SSH_USER", "").strip() or HPC_SSH_USER
     env_port_raw = os.getenv("HPC_SSH_PORT", "").strip()
-    env_port = int(env_port_raw) if env_port_raw.isdigit() else HPC_SSH_PORT
+    env_port = int(env_port_raw) if env_port_raw.isdigit() else None
     env_key_path = os.getenv("HPC_SSH_KEY_PATH", "").strip() or HPC_SSH_KEY_PATH
 
-    host = str(settings.get("ssh_host") or env_host or "").strip()
-    user = str(settings.get("ssh_user") or env_user or "ubuntu").strip()
-    raw_port = settings.get("ssh_port") or env_port or 22
+    # The launcher exports the exact host, port and user it successfully resolved
+    # (including 443/22 fallback). Prefer those process values so the API terminal
+    # uses the same SSH endpoint as the Prometheus tunnel.
+    host = str(env_host or settings.get("ssh_host") or "").strip()
+    user = str(env_user or settings.get("ssh_user") or "ubuntu").strip()
+    raw_port = env_port or settings.get("ssh_port") or HPC_SSH_PORT or 22
     try:
         port = int(raw_port)
     except (TypeError, ValueError):
@@ -104,6 +107,7 @@ def execute_restricted_cluster_command(
     command_args: List[str],
     target_node_ip: str = "localhost",
     timeout_sec: float = 6.0,
+    input_text: Optional[str] = None,
 ) -> Tuple[bool, str, str]:
     """
     Execute an allowlisted command array either:
@@ -123,6 +127,7 @@ def execute_restricted_cluster_command(
             if target_node_ip in HEADNODE_TARGETS:
                 proc = subprocess.run(
                     command_args,
+                    input=input_text,
                     capture_output=True,
                     text=True,
                     timeout=timeout_sec,
@@ -142,6 +147,7 @@ def execute_restricted_cluster_command(
                 ]
                 proc = subprocess.run(
                     ssh_cmd,
+                    input=input_text,
                     capture_output=True,
                     text=True,
                     timeout=timeout_sec,
@@ -191,6 +197,7 @@ def execute_restricted_cluster_command(
         try:
             proc = subprocess.run(
                 ssh_base,
+                input=input_text,
                 capture_output=True,
                 text=True,
                 timeout=timeout_sec,

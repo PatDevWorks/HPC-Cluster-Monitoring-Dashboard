@@ -113,6 +113,7 @@ def authenticate_password(email: str, password: str) -> Optional[dict]:
     conn = get_conn()
 
     try:
+        conn.execute("BEGIN IMMEDIATE")
         user = conn.execute(
             """
             SELECT
@@ -129,21 +130,225 @@ def authenticate_password(email: str, password: str) -> Optional[dict]:
         ).fetchone()
 
         if not user:
+            conn.commit()
             return None
 
         if not user["is_active"]:
+            conn.commit()
             return None
 
-        if not verify_password(password, user["password_hash"]):
+        if verify_password(password, user["password_hash"]):
+            conn.commit()
+            return {
+                "id": user["id"], "email": user["email"],
+                "role": user["role"], "email_verified": bool(user["email_verified_utc"]),
+                "temporary_password": False,
+            }
+
+        temporary = conn.execute(
+            """SELECT password_hash, expires_utc, revoked_utc, completed_utc, used_utc
+               FROM auth_temporary_credentials WHERE user_id = ?""",
+            (user["id"],),
+        ).fetchone()
+        now = utc_now()
+        if (
+            not temporary or temporary["revoked_utc"] or temporary["completed_utc"] or temporary["used_utc"]
+            or now >= datetime.fromisoformat(temporary["expires_utc"])
+            or not verify_password(password, temporary["password_hash"])
+        ):
+            conn.commit()
             return None
+
+        consumed = conn.execute(
+            """UPDATE auth_temporary_credentials SET used_utc = ?
+               WHERE user_id = ? AND used_utc IS NULL AND revoked_utc IS NULL AND completed_utc IS NULL""",
+            (utc_string(now), user["id"]),
+        )
+        if consumed.rowcount != 1:
+            conn.commit()
+            return None
+        conn.commit()
 
         return {
             "id": user["id"],
             "email": user["email"],
             "role": user["role"],
-            "email_verified": bool(user["email_verified_utc"])
+            "email_verified": bool(user["email_verified_utc"]),
+            "temporary_password": True,
         }
 
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+TEMP_PASSWORD_TTL_MINUTES = 10
+FIRST_LOGIN_TTL_MINUTES = 20
+
+
+def _new_temporary_password() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*"
+    return "".join(secrets.choice(alphabet) for _ in range(20))
+
+
+def create_temporary_account(email: str, role: str, invited_by: int) -> dict:
+    email = normalize_email(email)
+    if not validate_email(email):
+        raise ValueError("Invalid email address.")
+    if role not in {"admin", "viewer"}:
+        raise ValueError("Invalid invitation role.")
+    temporary_password = _new_temporary_password()
+    now = utc_now()
+    temporary_hash = hash_password(temporary_password)
+    random_permanent_hash = hash_password(secrets.token_urlsafe(48))
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = conn.execute("SELECT role, is_active FROM auth_users WHERE id = ?", (invited_by,)).fetchone()
+        if not actor or not actor["is_active"] or actor["role"] != "super_admin":
+            raise ValueError("Only an active super administrator can invite users.")
+        existing = conn.execute("SELECT id FROM auth_users WHERE email = ?", (email,)).fetchone()
+        if existing:
+            raise ValueError("An account already exists for this email. Reissue its temporary password instead.")
+        user_id = conn.execute(
+            """INSERT INTO auth_users (email, full_name, password_hash, role, is_active,
+               email_verified_utc, created_utc, updated_utc)
+               VALUES (?, '', ?, ?, 1, NULL, ?, ?)""",
+            (email, random_permanent_hash, role, utc_string(now), utc_string(now)),
+        ).lastrowid
+        expires = now + timedelta(minutes=TEMP_PASSWORD_TTL_MINUTES)
+        conn.execute(
+            "INSERT INTO auth_temporary_credentials (user_id, password_hash, created_utc, expires_utc) VALUES (?, ?, ?, ?)",
+            (user_id, temporary_hash, utc_string(now), utc_string(expires)),
+        )
+        invite_token = secrets.token_urlsafe(32)
+        conn.execute(
+            """INSERT INTO auth_invitations (email, token_hash, role, invited_by, created_utc, expires_utc)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (email, hash_token(f"invite:{invite_token}"), role, invited_by, utc_string(now), utc_string(expires)),
+        )
+        conn.execute(
+            "INSERT INTO auth_audit_log (actor_user_id, event_type, target_email, details_json, created_utc) VALUES (?, 'temporary_password_issued', ?, ?, ?)",
+            (invited_by, email, '{"role":"' + role + '"}', utc_string(now)),
+        )
+        conn.commit()
+        return {"user_id": user_id, "email": email, "role": role, "password": temporary_password, "expires_utc": utc_string(expires)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def reissue_temporary_password(user_id: int, invited_by: int) -> dict:
+    password = _new_temporary_password()
+    now = utc_now()
+    password_hash = hash_password(password)
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        actor = conn.execute("SELECT role, is_active FROM auth_users WHERE id = ?", (invited_by,)).fetchone()
+        user = conn.execute("SELECT id, email, role, is_active FROM auth_users WHERE id = ?", (user_id,)).fetchone()
+        credential = conn.execute("SELECT completed_utc FROM auth_temporary_credentials WHERE user_id = ?", (user_id,)).fetchone()
+        if not actor or not actor["is_active"] or actor["role"] != "super_admin":
+            raise ValueError("Only an active super administrator can reissue credentials.")
+        if not user or not user["is_active"] or user["role"] == "super_admin" or not credential or credential["completed_utc"]:
+            raise ValueError("This account is not eligible for temporary password reissue.")
+        conn.execute("UPDATE auth_first_login_states SET revoked_utc = ? WHERE user_id = ? AND consumed_utc IS NULL AND revoked_utc IS NULL", (utc_string(now), user_id))
+        conn.execute("UPDATE auth_otps SET invalidated_utc = ? WHERE user_id = ? AND consumed_utc IS NULL AND invalidated_utc IS NULL", (utc_string(now), user_id))
+        conn.execute("UPDATE auth_temporary_credentials SET revoked_utc = ? WHERE user_id = ? AND revoked_utc IS NULL", (utc_string(now), user_id))
+        expiry = now + timedelta(minutes=TEMP_PASSWORD_TTL_MINUTES)
+        conn.execute(
+            """INSERT INTO auth_temporary_credentials (user_id, password_hash, created_utc, expires_utc)
+               VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET
+               password_hash=excluded.password_hash, created_utc=excluded.created_utc,
+               expires_utc=excluded.expires_utc, revoked_utc=NULL, completed_utc=NULL, used_utc=NULL""",
+            (user_id, password_hash, utc_string(now), utc_string(expiry)),
+        )
+        conn.execute("UPDATE auth_sessions SET revoked_utc = ? WHERE user_id = ? AND revoked_utc IS NULL", (utc_string(now), user_id))
+        conn.execute("INSERT INTO auth_audit_log (actor_user_id, event_type, target_email, details_json, created_utc) VALUES (?, 'temporary_password_reissued', ?, '{}', ?)", (invited_by, user["email"], utc_string(now)))
+        conn.commit()
+        return {"user_id": user_id, "email": user["email"], "role": user["role"], "password": password, "expires_utc": utc_string(expiry)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def revoke_temporary_password(user_id: int) -> None:
+    """Invalidate an undelivered temporary password without disabling the invited account."""
+    now = utc_string()
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE auth_temporary_credentials SET revoked_utc = ? WHERE user_id = ? AND completed_utc IS NULL", (now, user_id))
+        conn.execute("UPDATE auth_first_login_states SET revoked_utc = ? WHERE user_id = ? AND consumed_utc IS NULL AND revoked_utc IS NULL", (now, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_first_login_state(user_id: int) -> dict:
+    raw = secrets.token_urlsafe(32)
+    now = utc_now()
+    expires = now + timedelta(minutes=FIRST_LOGIN_TTL_MINUTES)
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE auth_first_login_states SET revoked_utc = ? WHERE user_id = ? AND consumed_utc IS NULL AND revoked_utc IS NULL", (utc_string(now), user_id))
+        conn.execute("INSERT INTO auth_first_login_states (user_id, state_token_hash, created_utc, expires_utc) VALUES (?, ?, ?, ?)", (user_id, hash_token(f"first-login:{raw}"), utc_string(now), utc_string(expires)))
+        conn.commit()
+        return {"token": raw, "expires_utc": utc_string(expires)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_first_login_state(raw: Optional[str], require_otp: bool = False) -> Optional[dict]:
+    if not raw:
+        return None
+    conn = get_conn()
+    try:
+        row = conn.execute("""SELECT s.id, s.user_id, s.expires_utc, s.otp_verified_utc,
+             u.email, u.role, u.is_active, u.email_verified_utc
+             FROM auth_first_login_states s JOIN auth_users u ON u.id=s.user_id
+             WHERE s.state_token_hash=? AND s.consumed_utc IS NULL AND s.revoked_utc IS NULL""", (hash_token(f"first-login:{raw}"),)).fetchone()
+        if not row or not row["is_active"] or utc_now() >= datetime.fromisoformat(row["expires_utc"]):
+            return None
+        if require_otp and not row["otp_verified_utc"]:
+            return None
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def complete_first_login(raw: str, password: str) -> dict:
+    if len(password) < 12 or len(password) > 128:
+        raise ValueError("Password must be between 12 and 128 characters.")
+    digest = hash_password(password)
+    now = utc_now()
+    state_hash = hash_token(f"first-login:{raw}")
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        state = conn.execute("""SELECT s.id, s.user_id, s.expires_utc, s.otp_verified_utc, u.is_active, u.email_verified_utc
+          FROM auth_first_login_states s JOIN auth_users u ON u.id=s.user_id
+          WHERE s.state_token_hash=? AND s.consumed_utc IS NULL AND s.revoked_utc IS NULL""", (state_hash,)).fetchone()
+        if not state or not state["is_active"] or not state["email_verified_utc"] or not state["otp_verified_utc"] or now >= datetime.fromisoformat(state["expires_utc"]):
+            raise ValueError("First-time login state is invalid or expired. Please sign in again.")
+        conn.execute("UPDATE auth_users SET password_hash=?, updated_utc=? WHERE id=?", (digest, utc_string(now), state["user_id"]))
+        conn.execute("UPDATE auth_temporary_credentials SET revoked_utc=?, completed_utc=? WHERE user_id=? AND revoked_utc IS NULL", (utc_string(now), utc_string(now), state["user_id"]))
+        conn.execute("UPDATE auth_first_login_states SET consumed_utc=? WHERE id=?", (utc_string(now), state["id"]))
+        conn.execute("UPDATE auth_invitations SET accepted_utc=? WHERE email=(SELECT email FROM auth_users WHERE id=?) AND accepted_utc IS NULL AND revoked_utc IS NULL", (utc_string(now), state["user_id"]))
+        conn.commit()
+        return {"user_id": state["user_id"]}
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 # --------------------------------------------------

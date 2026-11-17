@@ -43,6 +43,20 @@ def _ensure_extended_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_model_obs_lookup
             ON model_score_observations (model_name, node_id, id DESC);
 
+        CREATE TABLE IF NOT EXISTS model_registry (
+            model_key TEXT PRIMARY KEY,
+            model_name TEXT NOT NULL,
+            version TEXT,
+            model_type TEXT NOT NULL DEFAULT '',
+            purpose TEXT NOT NULL DEFAULT '',
+            provider TEXT,
+            nodes_monitored_json TEXT NOT NULL DEFAULT '[]',
+            features_json TEXT NOT NULL DEFAULT '[]',
+            lookback_window TEXT,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS experiments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -71,6 +85,18 @@ def _ensure_extended_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_gemini_conv_session
             ON gemini_conversations (session_id, id DESC);
 
+        CREATE TABLE IF NOT EXISTS ai_conversation_metadata (
+            session_id TEXT NOT NULL,
+            owner_email TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT 'New conversation',
+            provider TEXT NOT NULL DEFAULT 'gemini',
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL,
+            PRIMARY KEY (session_id, owner_email)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_conversation_owner
+            ON ai_conversation_metadata (owner_email, updated_utc DESC);
+
         CREATE TABLE IF NOT EXISTS terminal_audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp_utc TEXT NOT NULL,
@@ -81,6 +107,13 @@ def _ensure_extended_tables(conn: sqlite3.Connection) -> None:
             blocked_reason TEXT,
             exit_code INTEGER,
             output_preview TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS slurm_job_submissions (
+            job_id TEXT PRIMARY KEY,
+            script TEXT NOT NULL,
+            submitted_utc TEXT NOT NULL,
+            parent_job_id TEXT
         );
         """
     )
@@ -262,6 +295,34 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
     ON auth_sessions (user_id);
 
+-- Temporary credentials are separate from the permanent password hash.
+CREATE TABLE IF NOT EXISTS auth_temporary_credentials (
+    user_id INTEGER PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_utc TEXT NOT NULL,
+    expires_utc TEXT NOT NULL,
+    revoked_utc TEXT,
+    completed_utc TEXT,
+    used_utc TEXT,
+    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+);
+
+-- Restricted first-login states are never accepted by normal auth dependencies.
+CREATE TABLE IF NOT EXISTS auth_first_login_states (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    state_token_hash TEXT NOT NULL UNIQUE,
+    created_utc TEXT NOT NULL,
+    expires_utc TEXT NOT NULL,
+    otp_verified_utc TEXT,
+    consumed_utc TEXT,
+    revoked_utc TEXT,
+    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_first_login_user
+    ON auth_first_login_states (user_id, created_utc DESC);
+
 
 -- ==========================================
 -- Authentication: Invitation-only registration
@@ -329,6 +390,13 @@ CREATE INDEX IF NOT EXISTS idx_auth_audit_created
                     """
                 )
 
+            temporary_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(auth_temporary_credentials)").fetchall()
+            }
+            if "used_utc" not in temporary_columns:
+                conn.execute("ALTER TABLE auth_temporary_credentials ADD COLUMN used_utc TEXT")
+
             # Safe migration: enrich alert_episodes with alert_source, evidence_json, actor & resolution notes.
             ep_columns = {
                 row["name"]
@@ -350,9 +418,6 @@ CREATE INDEX IF NOT EXISTS idx_auth_audit_created
                 conn.execute(
                     "ALTER TABLE alert_episodes ADD COLUMN resolution_note TEXT"
                 )
-
-            # Remove obsolete placeholder ModelEngine toggle table if present.
-            conn.execute("DROP TABLE IF EXISTS ml_engine_settings")
 
             conn.commit()
         finally:
@@ -530,11 +595,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "ssh_port": 22,
     "v7_enabled": True,
     "lstm_v8_enabled": True,
-    "restricted_terminal_enabled": False,
+    "restricted_terminal_enabled": True,
     "email_alerts_enabled": False,
     "alert_recipient_emails": "",
     "alert_policy": dict(ALERT_POLICY),
     "node_overrides": {},
+    "model_observation_retention_days": 30,
+    "model_observation_last_cleanup_utc": None,
 }
 
 _LEGACY_ALERT_POLICY_KEYS = {
@@ -613,6 +680,8 @@ def update_app_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
         "alert_recipient_emails",
         "alert_policy",
         "node_overrides",
+        "model_observation_retention_days",
+        "model_observation_last_cleanup_utc",
     }
     with _db_lock:
         conn = get_conn()
@@ -1063,6 +1132,42 @@ def list_slurm_audit(limit: int = 60) -> List[Dict[str, Any]]:
             conn.close()
 
 
+def save_slurm_job_submission(job_id: str, script: str, parent_job_id: Optional[str] = None) -> None:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO slurm_job_submissions
+                   (job_id, script, submitted_utc, parent_job_id) VALUES (?, ?, ?, ?)""",
+                (job_id, script, _utc_now_iso(), parent_job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_slurm_job_submission(job_id: str) -> Optional[Dict[str, Any]]:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM slurm_job_submissions WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def list_slurm_job_submission_ids() -> set:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            rows = conn.execute("SELECT job_id FROM slurm_job_submissions").fetchall()
+            return {str(row["job_id"]) for row in rows}
+        finally:
+            conn.close()
+
+
 def get_roi_totals() -> Dict[str, Any]:
     """Return actual recorded Slurm operator action totals without synthetic multipliers."""
     with _db_lock:
@@ -1227,6 +1332,10 @@ def list_model_observations(
     model_name: Optional[str] = None,
     node_id: Optional[str] = None,
     limit: int = 500,
+    since_utc: Optional[str] = None,
+    until_utc: Optional[str] = None,
+    classification: Optional[str] = None,
+    flagged: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     limit = max(1, min(int(limit), 5000))
     clauses = []
@@ -1237,6 +1346,18 @@ def list_model_observations(
     if node_id:
         clauses.append("node_id = ?")
         params.append(node_id)
+    if since_utc:
+        clauses.append("observation_utc >= ?")
+        params.append(since_utc)
+    if until_utc:
+        clauses.append("observation_utc <= ?")
+        params.append(until_utc)
+    if classification:
+        clauses.append("classification = ?")
+        params.append(classification)
+    if flagged is not None:
+        clauses.append("flagged = ?")
+        params.append(1 if flagged else 0)
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     with _db_lock:
@@ -1257,6 +1378,46 @@ def list_model_observations(
                     d["details"] = {}
                 out.append(d)
             return out
+        finally:
+            conn.close()
+
+
+def cleanup_model_observations(retention_days: int) -> Dict[str, Any]:
+    """Atomically delete only expired model observations and record cleanup time."""
+    if retention_days not in (15, 30):
+        raise ValueError("Observation retention must be 15 or 30 days.")
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=retention_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cleaned_utc = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _db_lock:
+        conn = get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                "DELETE FROM model_score_observations WHERE datetime(observation_utc) IS NOT NULL AND datetime(observation_utc) < datetime(?)",
+                (cutoff,),
+            )
+            conn.execute(
+                """
+                INSERT INTO app_settings (key, value_json, updated_utc)
+                VALUES ('model_observation_last_cleanup_utc', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    updated_utc = excluded.updated_utc
+                """,
+                (json.dumps(cleaned_utc), cleaned_utc),
+            )
+            conn.commit()
+            return {
+                "retention_days": retention_days,
+                "cutoff_utc": cutoff,
+                "last_cleanup_utc": cleaned_utc,
+                "deleted_count": cursor.rowcount,
+            }
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1390,6 +1551,21 @@ def append_gemini_message(
                     created,
                 ),
             )
+            evidence_data = evidence or {}
+            provider = str(evidence_data.get("provider") or "gemini")
+            title = content.strip().replace("\n", " ")[:80] if role == "user" else "New conversation"
+            conn.execute(
+                """INSERT INTO ai_conversation_metadata (
+                    session_id, owner_email, title, provider, created_utc, updated_utc
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, owner_email) DO UPDATE SET
+                    title = CASE
+                        WHEN ai_conversation_metadata.title = 'New conversation' AND excluded.title != 'New conversation'
+                        THEN excluded.title ELSE ai_conversation_metadata.title END,
+                    provider = CASE WHEN ? = 'assistant' THEN excluded.provider ELSE ai_conversation_metadata.provider END,
+                    updated_utc = excluded.updated_utc""",
+                (session_id, user_email, title or "New conversation", provider, created, created, role),
+            )
             conn.commit()
             return int(cur.lastrowid)
         finally:
@@ -1399,6 +1575,7 @@ def append_gemini_message(
 def list_gemini_messages(
     session_id: Optional[str] = None,
     limit: int = 100,
+    user_email: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     limit = max(1, min(int(limit), 500))
     with _db_lock:
@@ -1406,15 +1583,28 @@ def list_gemini_messages(
         try:
             _ensure_extended_tables(conn)
             if session_id:
-                rows = conn.execute(
-                    "SELECT * FROM gemini_conversations WHERE session_id = ? ORDER BY id ASC LIMIT ?",
-                    (session_id, limit),
-                ).fetchall()
+                if user_email is not None:
+                    rows = conn.execute(
+                        "SELECT * FROM gemini_conversations WHERE session_id = ? AND user_email = ? ORDER BY id DESC LIMIT ?",
+                        (session_id, user_email, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM gemini_conversations WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                        (session_id, limit),
+                    ).fetchall()
+                rows = list(reversed(rows))
             else:
-                rows = conn.execute(
-                    "SELECT * FROM gemini_conversations ORDER BY id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                if user_email is not None:
+                    rows = conn.execute(
+                        "SELECT * FROM gemini_conversations WHERE user_email = ? ORDER BY id DESC LIMIT ?",
+                        (user_email, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM gemini_conversations ORDER BY id DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
             out: List[Dict[str, Any]] = []
             for r in rows:
                 d = dict(r)
@@ -1424,6 +1614,172 @@ def list_gemini_messages(
                     d["evidence"] = {}
                 out.append(d)
             return out
+        finally:
+            conn.close()
+
+
+def _backfill_ai_conversations(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """INSERT OR IGNORE INTO ai_conversation_metadata (
+            session_id, owner_email, title, provider, created_utc, updated_utc
+        ) SELECT c.session_id, c.user_email,
+                 COALESCE((SELECT substr(first.content, 1, 80) FROM gemini_conversations first
+                           WHERE first.session_id = c.session_id AND first.user_email = c.user_email
+                             AND first.role = 'user' ORDER BY first.id LIMIT 1), 'New conversation'),
+                 'gemini', MIN(c.created_utc), MAX(c.created_utc)
+          FROM gemini_conversations c GROUP BY c.session_id, c.user_email"""
+    )
+    conn.commit()
+
+
+def ensure_ai_conversation(session_id: str, user_email: str, provider: str = "gemini") -> None:
+    now = _utc_now_iso()
+    with _db_lock:
+        conn = get_conn()
+        try:
+            _ensure_extended_tables(conn)
+            _backfill_ai_conversations(conn)
+            conn.execute(
+                "INSERT OR IGNORE INTO ai_conversation_metadata (session_id, owner_email, title, provider, created_utc, updated_utc) VALUES (?, ?, 'New conversation', ?, ?, ?)",
+                (session_id, user_email, provider, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def create_ai_conversation(user_email: str, provider: str = "gemini", title: str = "New conversation") -> Dict[str, Any]:
+    import uuid
+    session_id = uuid.uuid4().hex
+    now = _utc_now_iso()
+    with _db_lock:
+        conn = get_conn()
+        try:
+            _ensure_extended_tables(conn)
+            conn.execute(
+                "INSERT INTO ai_conversation_metadata (session_id, owner_email, title, provider, created_utc, updated_utc) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, user_email, title[:120], provider, now, now),
+            )
+            conn.commit()
+            return {"session_id": session_id, "owner_email": user_email, "title": title[:120], "provider": provider, "created_utc": now, "updated_utc": now, "message_count": 0}
+        finally:
+            conn.close()
+
+
+def list_ai_conversations(user_email: str, search: Optional[str] = None) -> List[Dict[str, Any]]:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            _ensure_extended_tables(conn)
+            _backfill_ai_conversations(conn)
+            clauses = ["m.owner_email = ?"]
+            params: List[Any] = [user_email]
+            if search:
+                clauses.append("(m.title LIKE ? OR EXISTS (SELECT 1 FROM gemini_conversations s WHERE s.session_id = m.session_id AND s.user_email = m.owner_email AND s.content LIKE ?))")
+                params.extend((f"%{search[:100]}%", f"%{search[:100]}%"))
+            rows = conn.execute(
+                f"""SELECT m.session_id, m.title, m.provider, m.created_utc, m.updated_utc,
+                           COUNT(c.id) AS message_count, MAX(c.created_utc) AS last_message_utc,
+                           (SELECT p.content FROM gemini_conversations p WHERE p.session_id = m.session_id AND p.user_email = m.owner_email ORDER BY p.id DESC LIMIT 1) AS last_message_preview
+                    FROM ai_conversation_metadata m
+                    LEFT JOIN gemini_conversations c
+                      ON c.session_id = m.session_id AND c.user_email = m.owner_email
+                    WHERE {' AND '.join(clauses)}
+                    GROUP BY m.session_id, m.owner_email
+                    ORDER BY m.updated_utc DESC""",
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+
+def get_ai_conversation(session_id: str, user_email: str) -> Optional[Dict[str, Any]]:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            _ensure_extended_tables(conn)
+            _backfill_ai_conversations(conn)
+            row = conn.execute(
+                "SELECT * FROM ai_conversation_metadata WHERE session_id = ? AND owner_email = ?",
+                (session_id, user_email),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def rename_ai_conversation(session_id: str, user_email: str, title: str) -> bool:
+    now = _utc_now_iso()
+    with _db_lock:
+        conn = get_conn()
+        try:
+            cursor = conn.execute(
+                "UPDATE ai_conversation_metadata SET title = ?, updated_utc = ? WHERE session_id = ? AND owner_email = ?",
+                (title.strip()[:120], now, session_id, user_email),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def set_ai_conversation_provider(session_id: str, user_email: str, provider: str) -> bool:
+    now = _utc_now_iso()
+    with _db_lock:
+        conn = get_conn()
+        try:
+            cursor = conn.execute(
+                "UPDATE ai_conversation_metadata SET provider = ?, updated_utc = ? WHERE session_id = ? AND owner_email = ?",
+                (provider, now, session_id, user_email),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def clear_ai_conversation(session_id: str, user_email: str) -> bool:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            exists = conn.execute(
+                "SELECT 1 FROM ai_conversation_metadata WHERE session_id = ? AND owner_email = ?",
+                (session_id, user_email),
+            ).fetchone()
+            if not exists:
+                conn.rollback()
+                return False
+            conn.execute("DELETE FROM gemini_conversations WHERE session_id = ? AND user_email = ?", (session_id, user_email))
+            conn.execute(
+                "UPDATE ai_conversation_metadata SET title = 'New conversation', updated_utc = ? WHERE session_id = ? AND owner_email = ?",
+                (_utc_now_iso(), session_id, user_email),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def delete_ai_conversation(session_id: str, user_email: str) -> bool:
+    with _db_lock:
+        conn = get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM gemini_conversations WHERE session_id = ? AND user_email = ?", (session_id, user_email))
+            cursor = conn.execute(
+                "DELETE FROM ai_conversation_metadata WHERE session_id = ? AND owner_email = ?",
+                (session_id, user_email),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -1492,7 +1848,9 @@ def list_auth_users() -> List[Dict[str, Any]]:
         conn = get_conn()
         try:
             rows = conn.execute(
-                "SELECT * FROM auth_users ORDER BY id ASC"
+                """SELECT u.*, CASE WHEN t.user_id IS NOT NULL AND t.completed_utc IS NULL THEN 1 ELSE 0 END AS first_login_pending
+                   FROM auth_users u LEFT JOIN auth_temporary_credentials t ON t.user_id=u.id
+                   ORDER BY u.id ASC"""
             ).fetchall()
             out: List[Dict[str, Any]] = []
             for r in rows:

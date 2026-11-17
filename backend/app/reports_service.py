@@ -237,7 +237,7 @@ def build_report_data(
 def export_report_csv(report_payload: Dict[str, Any]) -> Tuple[bytes, str]:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["# Platform", "Sol Plaatje A Dev Cluster Dashboard"])
+    writer.writerow(["# Platform", "HPC Predictive Monitoring Dashboard"])
     writer.writerow(["# Report", report_payload["title"]])
     writer.writerow(["# Generated UTC", report_payload["generated_utc"]])
     summary = report_payload.get("summary", {})

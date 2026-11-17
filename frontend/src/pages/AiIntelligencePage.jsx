@@ -6,6 +6,10 @@ import {
   BarChart3,
   Clock,
   FileSearch,
+  Check,
+  MessageSquarePlus,
+  Pencil,
+  Search,
   Send,
   ShieldCheck,
   Sparkles,
@@ -20,6 +24,8 @@ const SUGGESTED_CHAT_PROMPTS = [
   'What should an administrator investigate next based on live telemetry and recent incidents?',
 ];
 
+const PROVIDER_LABELS = { gemini: 'Gemini', openai: 'OpenAI', groq: 'Groq' };
+
 export default function AiIntelligencePage({
   snapshot,
   user,
@@ -29,9 +35,15 @@ export default function AiIntelligencePage({
   showToast,
 }) {
   const [tab, setTab] = useState(initialEpisodeId ? 'investigate' : 'chat');
-  const [sessionId, setSessionId] = useState(() => `ops-${new Date().toISOString().slice(0, 10)}`);
+  const [sessionId, setSessionId] = useState('');
   const [messages, setMessages] = useState([]);
-  const [geminiMeta, setGeminiMeta] = useState({ configured: null, model: '--' });
+  const [provider, setProvider] = useState('gemini');
+  const [providerStatus, setProviderStatus] = useState({});
+  const [conversations, setConversations] = useState([]);
+  const [conversationSearch, setConversationSearch] = useState('');
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [testingProvider, setTestingProvider] = useState(false);
 
   // Chat state
   const [chatInput, setChatInput] = useState('');
@@ -63,23 +75,133 @@ export default function AiIntelligencePage({
     }
   }, [initialEpisodeId]);
 
-  const loadContext = async () => {
+  const loadConversations = async () => {
     try {
-      const [histRes, setRes] = await Promise.all([
-        api.getAiHistory(sessionId, 80),
-        api.getSettings(),
+      const [conversationRes, providerRes] = await Promise.all([
+        api.getAiConversations(), api.getAiProviders(),
       ]);
-      setMessages(histRes?.messages || []);
-      const g = setRes?.service_health?.gemini || {};
-      setGeminiMeta({ configured: Boolean(g.configured), model: g.model || '--' });
-    } catch {
-      // Ignore transient load error
+      const items = conversationRes?.conversations || [];
+      setConversations(items);
+      setProviderStatus(providerRes?.providers || {});
+      if (!sessionId) {
+        if (items.length) {
+          setSessionId(items[0].session_id);
+          setProvider(items[0].provider || 'gemini');
+        } else {
+          const created = await api.createAiConversation(provider);
+          setSessionId(created.session_id);
+          setConversations([created]);
+        }
+      }
+    } catch (err) {
+      showToast?.(`Could not load AI conversations: ${err.message}`);
     }
   };
+
+  const loadContext = async () => {
+    if (!sessionId) return;
+    try {
+      const [histRes, providerRes] = await Promise.all([
+        api.getAiHistory(sessionId, 80), api.getAiProviders(),
+      ]);
+      setMessages(histRes?.messages || []);
+      setProviderStatus(providerRes?.providers || {});
+    } catch (err) {
+      showToast?.(`Could not load conversation: ${err.message}`);
+    }
+  };
+
+  useEffect(() => { loadConversations(); }, []);
 
   useEffect(() => {
     loadContext();
   }, [sessionId]);
+
+  const handleNewConversation = async () => {
+    try {
+      const created = await api.createAiConversation(provider);
+      setConversations((items) => [created, ...items]);
+      setSessionId(created.session_id);
+      setMessages([]);
+      setTab('chat');
+    } catch (err) {
+      showToast?.(`Could not create conversation: ${err.message}`);
+    }
+  };
+
+  const handleProviderChange = async (nextProvider) => {
+    setProvider(nextProvider);
+    if (!sessionId) return;
+    try {
+      await api.updateAiConversation(sessionId, { provider: nextProvider });
+      setConversations((items) => items.map((item) => item.session_id === sessionId ? { ...item, provider: nextProvider } : item));
+    } catch (err) {
+      showToast?.(`Could not update provider: ${err.message}`);
+    }
+  };
+
+  const handleRenameConversation = async () => {
+    const title = editingTitle.trim();
+    if (!title || !editingSessionId) return;
+    try {
+      await api.updateAiConversation(editingSessionId, { title });
+      setConversations((items) => items.map((item) => item.session_id === editingSessionId ? { ...item, title } : item));
+      setEditingSessionId(null);
+    } catch (err) {
+      showToast?.(`Could not rename conversation: ${err.message}`);
+    }
+  };
+
+  const handleDeleteConversation = async (targetId) => {
+    if (!window.confirm('Delete this conversation and its messages?')) return;
+    try {
+      await api.deleteAiConversation(targetId);
+      const next = conversations.filter((item) => item.session_id !== targetId);
+      setConversations(next);
+      if (targetId === sessionId) {
+        if (next.length) {
+          setSessionId(next[0].session_id);
+          setProvider(next[0].provider || 'gemini');
+        } else {
+          const created = await api.createAiConversation(provider);
+          setConversations([created]);
+          setSessionId(created.session_id);
+          setMessages([]);
+        }
+      }
+    } catch (err) {
+      showToast?.(`Could not delete conversation: ${err.message}`);
+    }
+  };
+
+  const handleClearConversation = async () => {
+    if (!sessionId || !window.confirm('Clear the messages and context in this conversation?')) return;
+    try {
+      await api.clearAiConversation(sessionId);
+      setMessages([]);
+      await loadConversations();
+    } catch (err) {
+      showToast?.(`Could not clear conversation: ${err.message}`);
+    }
+  };
+
+  const handleTestProvider = async () => {
+    setTestingProvider(true);
+    try {
+      const result = await api.testAiProvider(provider);
+      setProviderStatus((old) => ({ ...old, [provider]: result }));
+      showToast?.(result.reachable ? `${result.provider} responded using ${result.model}.` : `${result.provider} check failed: ${result.detail}`);
+    } catch (err) {
+      showToast?.(`Provider check failed: ${err.message}`);
+    } finally {
+      setTestingProvider(false);
+    }
+  };
+
+  const activeProviderStatus = providerStatus[provider] || {};
+  const visibleConversations = conversations.filter((item) =>
+    `${item.title || ''} ${item.last_message_preview || ''}`.toLowerCase().includes(conversationSearch.toLowerCase())
+  );
 
   const selectedEpObj = useMemo(
     () => episodes.find((e) => String(e.id) === String(targetEpId)) || null,
@@ -91,14 +213,15 @@ export default function AiIntelligencePage({
     if (!q || sending) return;
     setSending(true);
     try {
-      const res = await api.aiChat(q, sessionId, rangeMinutes);
+      const res = await api.aiChat(q, sessionId, rangeMinutes, provider);
       if (!promptOverride) setChatInput('');
       await loadContext();
+      await loadConversations();
       if (res?.answer) {
-        showToast?.(`Gemini replied (${res.model})`);
+        showToast?.(`${res.provider} replied (${res.model})`);
       }
     } catch (err) {
-      showToast?.(`Gemini assistant error: ${err.message}`);
+      showToast?.(`${provider} assistant error: ${err.message}`);
     } finally {
       setSending(false);
     }
@@ -114,10 +237,12 @@ export default function AiIntelligencePage({
         node_id: targetNode || null,
         question: invQuestion,
         session_id: sessionId,
+        provider,
       });
       setInvResult(res);
       await loadContext();
-      showToast?.(`Incident investigation completed via ${res.model}`);
+      await loadConversations();
+      showToast?.(`Incident investigation completed via ${res.provider} (${res.model})`);
     } catch (err) {
       showToast?.(`Investigation failed: ${err.message}`);
     } finally {
@@ -130,10 +255,11 @@ export default function AiIntelligencePage({
     if (!analyticsQuestion.trim() || sending) return;
     setSending(true);
     try {
-      const res = await api.aiQueryAnalytics(analyticsQuestion, analyticsRange, sessionId);
+      const res = await api.aiQueryAnalytics(analyticsQuestion, analyticsRange, sessionId, provider);
       setAnalyticsResult(res);
       await loadContext();
-      showToast?.(`Cluster analytics completed via ${res.model}`);
+      await loadConversations();
+      showToast?.(`Cluster analytics completed via ${res.provider} (${res.model})`);
     } catch (err) {
       showToast?.(`Analytics query failed: ${err.message}`);
     } finally {
@@ -156,14 +282,8 @@ export default function AiIntelligencePage({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span
-            className={`rounded-full px-3 py-1 font-mono text-[11px] font-bold uppercase ${
-              geminiMeta.configured
-                ? 'bg-emerald-500/15 text-emerald-400'
-                : 'bg-rose-500/15 text-rose-400'
-            }`}
-          >
-            Gemini: {geminiMeta.configured ? `Ready (${geminiMeta.model})` : 'Not Configured'}
+          <span className={`rounded-full px-3 py-1 font-mono text-[11px] font-bold uppercase ${activeProviderStatus.configured ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
+            {PROVIDER_LABELS[provider] || provider}: {activeProviderStatus.configured ? `${activeProviderStatus.model || 'Configured'} · ${activeProviderStatus.reachable === true ? 'Connected' : activeProviderStatus.reachable === false ? 'Unavailable' : 'Not checked'}` : 'Not configured'}
           </span>
 
           <button
@@ -204,18 +324,28 @@ export default function AiIntelligencePage({
 
       {/* TAB 1: CONVERSATIONAL ASSISTANT */}
       {tab === 'chat' && (
-        <div className="grid grid-cols-1 gap-5 xl:grid-cols-12">
-          <div className="spu-card p-5 xl:col-span-8 flex flex-col justify-between min-h-[520px]">
-            <div className="space-y-3 overflow-y-auto max-h-[420px] pr-1">
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+          <aside className="spu-card min-h-[420px] p-4 xl:col-span-3">
+            <div className="flex items-center justify-between gap-2"><h3 className="text-xs font-bold uppercase tracking-wider spu-text-secondary">Conversations</h3><button onClick={handleNewConversation} title="New conversation" className="rounded-lg border spu-border p-2 text-[var(--accent-cyan)]"><MessageSquarePlus className="h-4 w-4" /></button></div>
+            <label className="mt-3 flex items-center gap-2 rounded-lg border spu-border px-2.5"><Search className="h-3.5 w-3.5 spu-text-muted" /><input value={conversationSearch} onChange={(event) => setConversationSearch(event.target.value)} placeholder="Search conversations" className="min-w-0 flex-1 bg-transparent py-2 text-xs outline-none" /></label>
+            <div className="mt-3 max-h-[520px] space-y-1 overflow-y-auto">
+              {visibleConversations.map((conversation) => <div key={conversation.session_id} className={`rounded-lg p-2 ${conversation.session_id === sessionId ? 'bg-cyan-500/10 ring-1 ring-cyan-500/30' : 'hover:bg-[var(--bg-hover)]'}`}>
+                {editingSessionId === conversation.session_id ? <div className="flex gap-1"><input value={editingTitle} onChange={(event) => setEditingTitle(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && handleRenameConversation()} autoFocus className="min-w-0 flex-1 rounded border spu-border bg-transparent px-2 py-1 text-xs" /><button onClick={handleRenameConversation} title="Save title" className="text-emerald-400"><Check className="h-4 w-4" /></button></div> : <div className="flex items-start gap-1"><button onClick={() => { setSessionId(conversation.session_id); setProvider(conversation.provider || 'gemini'); setTab('chat'); }} className="min-w-0 flex-1 text-left"><span className="block truncate text-xs font-semibold">{conversation.title || 'New conversation'}</span><span className="mt-1 block truncate text-[10px] spu-text-muted">{conversation.last_message_preview || `${conversation.provider || 'Gemini'} · ${conversation.message_count || 0} messages`}</span><span className="mt-1 block text-[9px] spu-text-muted">{conversation.last_message_utc ? new Date(conversation.last_message_utc).toLocaleString() : new Date(conversation.updated_utc).toLocaleString()}</span></button><button onClick={() => { setEditingSessionId(conversation.session_id); setEditingTitle(conversation.title || ''); }} title="Rename conversation" className="rounded p-1 spu-text-secondary hover:text-[var(--accent-cyan)]"><Pencil className="h-3.5 w-3.5" /></button><button onClick={() => handleDeleteConversation(conversation.session_id)} title="Delete conversation" className="rounded p-1 spu-text-secondary hover:text-rose-400"><Trash2 className="h-3.5 w-3.5" /></button></div>}
+              </div>)}
+              {!visibleConversations.length && <p className="p-3 text-xs spu-text-secondary">No matching conversations.</p>}
+            </div>
+          </aside>
+
+          <div className="spu-card flex min-h-[520px] flex-col p-4 xl:col-span-6">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b spu-border pb-3"><div><div className="text-sm font-semibold">{conversations.find((item) => item.session_id === sessionId)?.title || 'New conversation'}</div><div className="mt-1 text-[10px] spu-text-muted">Cluster evidence is retrieved for each request. Assistant text is interpretation.</div></div><button onClick={handleClearConversation} className="inline-flex items-center gap-1 rounded-lg border spu-border px-2 py-1.5 text-[10px] spu-text-secondary hover:text-rose-400"><Trash2 className="h-3 w-3" /> Clear context</button></div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
               {messages.length === 0 ? (
                 <div className="py-12 text-center text-xs spu-text-secondary">
                   <Bot className="mx-auto mb-2 h-8 w-8 text-[var(--accent-cyan)] opacity-70" />
                   <p className="font-semibold text-[var(--text-primary)]">
-                    Ask Gemini.
+                    Ask the HPC AI Assistant.
                   </p>
-                  <p className="mt-1 spu-text-muted">
-                   
-                  </p>
+                  <p className="mt-1 spu-text-muted">Choose a configured provider, then ask about current cluster evidence.</p>
                 </div>
               ) : (
                 messages.map((m) => (
@@ -229,13 +359,14 @@ export default function AiIntelligencePage({
                   >
                     <div className="mb-1 flex items-center justify-between font-mono text-[10px] spu-text-muted">
                       <span>
-                        {m.role === 'user' ? user?.email || 'Administrator' : `Gemini (${m.evidence?.model || geminiMeta.model})`} • {m.mode}
+                        {m.role === 'user' ? user?.email || 'Operator' : `${m.evidence?.provider || 'gemini'} · ${m.evidence?.model || ''} · LLM interpretation`} · {m.mode}
                       </span>
                       <span>{m.created_utc}</span>
                     </div>
                     <div className="whitespace-pre-wrap leading-relaxed text-[var(--text-primary)]">
                       {m.content}
                     </div>
+                    {m.role === 'assistant' && m.evidence?.evidence_summary && <details className="mt-3 border-t spu-border pt-2"><summary className="cursor-pointer text-[10px] font-semibold text-[var(--accent-cyan)]">Evidence references</summary><pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-[10px] spu-text-secondary">{JSON.stringify(m.evidence.evidence_summary, null, 2)}</pre></details>}
                   </div>
                 ))
               )}
@@ -243,21 +374,12 @@ export default function AiIntelligencePage({
 
             <div className="mt-4 border-t pt-3 spu-border">
               <div className="mb-2 flex items-center justify-between text-[11px] spu-text-secondary">
-                <span>Telemetry Context Window:</span>
-                <select
-                  value={rangeMinutes}
-                  onChange={(e) => setRangeMinutes(Number(e.target.value))}
-                  className="spu-input py-1 text-xs"
-                >
-                  <option value={15}>Last 15 minutes</option>
-                  <option value={60}>Last 1 hour</option>
-                  <option value={360}>Last 6 hours</option>
-                  <option value={1440}>Last 24 hours</option>
-                </select>
+                <label>Provider <select value={provider} onChange={(event) => handleProviderChange(event.target.value)} className="spu-input ml-1 py-1 text-xs"><option value="gemini" disabled={!providerStatus.gemini?.configured && provider !== 'gemini'}>Gemini {providerStatus.gemini?.model ? `· ${providerStatus.gemini.model}` : ''}{providerStatus.gemini?.configured ? '' : ' · Not configured'}</option><option value="openai" disabled={!providerStatus.openai?.configured && provider !== 'openai'}>OpenAI {providerStatus.openai?.model ? `· ${providerStatus.openai.model}` : ''}{providerStatus.openai?.configured ? '' : ' · Not configured'}</option><option value="groq" disabled={!providerStatus.groq?.configured && provider !== 'groq'}>Groq {providerStatus.groq?.model ? `· ${providerStatus.groq.model}` : ''}{providerStatus.groq?.configured ? '' : ' · Not configured'}</option></select></label>
+                <label>Context <select value={rangeMinutes} onChange={(e) => setRangeMinutes(Number(e.target.value))} className="spu-input ml-1 py-1 text-xs"><option value={15}>15 min</option><option value={60}>1 hour</option><option value={360}>6 hours</option><option value={1440}>24 hours</option></select></label>
               </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
+              <div className="flex items-end gap-2">
+                <textarea
+                  rows={3}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -266,23 +388,24 @@ export default function AiIntelligencePage({
                       handleSendChat();
                     }
                   }}
-                  placeholder="Ask Gemini about cluster state, node anomalies, V7/LSTM signals, or Slurm jobs..."
-                  className="spu-input flex-1 text-xs"
+                  placeholder={`Ask ${PROVIDER_LABELS[provider] || provider} about cluster state, node anomalies, model outputs, or Slurm jobs…`}
+                  className="spu-input min-h-20 flex-1 resize-y text-xs"
                 />
                 <button
                   onClick={() => handleSendChat()}
-                  disabled={sending || !chatInput.trim()}
+                  disabled={sending || !chatInput.trim() || !activeProviderStatus.configured}
                   className="spu-btn-primary inline-flex items-center gap-1.5"
                 >
                   <Send className="h-3.5 w-3.5" />
-                  {sending ? 'Analysing...' : 'Send'}
+                  {sending ? 'Thinking…' : 'Send'}
                 </button>
               </div>
+              {user?.role === 'admin' || user?.role === 'super_admin' ? <button disabled={testingProvider || !activeProviderStatus.configured} onClick={handleTestProvider} className="mt-2 text-[10px] font-semibold text-[var(--accent-cyan)] disabled:opacity-50">{testingProvider ? 'Checking provider…' : `Test ${PROVIDER_LABELS[provider] || provider} connection`}</button> : null}
             </div>
           </div>
 
           {/* Right rail: Quick Prompts & Live Context Summary */}
-          <div className="space-y-4 xl:col-span-4">
+          <div className="space-y-4 xl:col-span-3">
             <div className="spu-card p-4">
               <h3 className="text-xs font-bold uppercase tracking-wider spu-text-secondary mb-2.5">
                 Quick Operational Questions

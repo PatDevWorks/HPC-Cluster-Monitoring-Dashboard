@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Activity,
+  ChevronDown,
+  ChevronRight,
   BarChart3,
   Bell,
   BrainCircuit,
@@ -16,20 +18,29 @@ import {
 import SpuLogo from './SpuLogo.jsx';
 
 export const NAV_ITEMS = [
-  { id: 'overview', label: 'Overview', icon: Home },
-  { id: 'topology', label: 'Infrastructure Topology', icon: Network },
-  { id: 'monitoring', label: 'Node Monitoring', icon: Activity },
-  { id: 'predictions', label: 'AI Model Centre', icon: BrainCircuit },
-  { id: 'intelligence', label: 'AI Intelligence Centre', icon: Sparkles },
-  { id: 'jobs', label: 'Workload Intelligence', icon: Briefcase },
+  { id: 'overview', label: 'Dashboard Overview', icon: Home },
+  { id: 'topology', label: 'Cluster Topology', icon: Network },
+  { id: 'monitoring', label: 'Live Telemetry', icon: Activity },
   { id: 'logs', label: 'Node Logs & Diagnostics', icon: FileTerminal },
-  { id: 'alerts', label: 'Incidents & Alerts', icon: Bell, showAlertBadge: true },
-  { id: 'experiments', label: 'Experiments & Evaluation', icon: FlaskConical },
-  { id: 'analytics', label: 'Historical Analytics', icon: BarChart3 },
+  { id: 'predictions', label: 'Models Centre', icon: BrainCircuit },
+  { id: 'intelligence', label: 'AI Assistant', icon: Sparkles },
+  { id: 'alerts', label: 'Incident Management', icon: Bell, showAlertBadge: true },
+  { id: 'jobs', label: 'Workload Intelligence', icon: Briefcase },
+  { id: 'terminal', label: 'Operations Terminal', icon: Terminal, adminOnly: true },
+  { id: 'experiments', label: 'Model Evaluation', icon: FlaskConical },
+  { id: 'analytics', label: 'Performance Analytics', icon: BarChart3 },
   { id: 'reports', label: 'Reports', icon: FileSpreadsheet },
-  { id: 'settings', label: 'System Settings', icon: Settings },
-  { id: 'users', label: 'User Management', icon: Users },
-  { id: 'terminal', label: 'Operations Terminal', icon: Terminal },
+  { id: 'settings', label: 'System Configuration', icon: Settings, adminOnly: true },
+  { id: 'users', label: 'User Management', icon: Users, adminOnly: true },
+];
+
+export const NAV_GROUPS = [
+  { id: 'overview', label: 'Overview', icon: Home, items: ['overview'] },
+  { id: 'infrastructure', label: 'Infrastructure', icon: Network, items: ['topology', 'monitoring', 'logs'] },
+  { id: 'intelligence', label: 'Intelligence', icon: BrainCircuit, items: ['predictions', 'intelligence', 'alerts', 'jobs'] },
+  { id: 'operations', label: 'Operations', icon: Terminal, items: ['terminal'] },
+  { id: 'analytics', label: 'Analytics', icon: BarChart3, items: ['experiments', 'analytics', 'reports'] },
+  { id: 'administration', label: 'Administration', icon: Settings, adminOnly: true, items: ['settings', 'users'] },
 ];
 
 function formatSidebarTimestamp(isoStr) {
@@ -59,7 +70,16 @@ export default function Sidebar({
   onCloseMobile,
   snapshot,
   wsConnected,
+  user,
 }) {
+  const [expandedGroups, setExpandedGroups] = useState({
+    overview: true,
+    infrastructure: true,
+    intelligence: true,
+    operations: false,
+    analytics: false,
+    administration: false,
+  });
   const kpis = snapshot?.kpis || {};
   const nodesOnline = kpis.nodes_online ?? 0;
   const nodesTotal = kpis.nodes_total ?? 4;
@@ -78,6 +98,12 @@ export default function Sidebar({
       : clusterStatus === 'warning'
       ? '#f59e0b'
       : '#ef4444';
+
+  const isAdmin = ['admin', 'super_admin'].includes(user?.role);
+  useEffect(() => {
+    const activeGroup = NAV_GROUPS.find((group) => group.items.includes(activePage));
+    if (activeGroup) setExpandedGroups((current) => ({ ...current, [activeGroup.id]: true }));
+  }, [activePage]);
 
   const sidebarContent = (
     <aside
@@ -100,55 +126,26 @@ export default function Sidebar({
         </div>
 
         {/* Navigation Links */}
-        <nav className="mt-2 flex-1 space-y-0.5 overflow-y-auto px-2.5 pb-3">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const isActive = activePage === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => {
-                  onNavigate(item.id);
-                  if (onCloseMobile) onCloseMobile();
-                }}
-                title={collapsed ? item.label : undefined}
-                style={
-                  isActive
-                    ? {
-                        background: 'var(--bg-active-nav)',
-                        color: 'var(--accent-cyan)',
-                        borderLeft: '3px solid var(--accent-cyan)',
-                      }
-                    : { borderLeft: '3px solid transparent' }
-                }
-                className={`group flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-[13px] font-medium transition-colors ${
-                  isActive
-                    ? 'font-semibold'
-                    : 'spu-text-secondary hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
-                }`}
-              >
-                <span className="flex items-center gap-3 truncate">
-                  <Icon
-                    className={`h-4 w-4 shrink-0 ${
-                      isActive ? 'text-[var(--accent-cyan)]' : 'opacity-80 group-hover:opacity-100'
-                    }`}
-                  />
-                  {!collapsed && <span className="truncate">{item.label}</span>}
-                </span>
-
-                {item.showAlertBadge && activeAlerts > 0 && (
-                  <span
-                    className={`inline-flex items-center justify-center rounded-full bg-rose-500 font-bold text-white ${
-                      collapsed
-                        ? 'h-4 min-w-[16px] px-1 text-[9px]'
-                        : 'h-5 min-w-[20px] px-1.5 text-[10px]'
-                    }`}
-                  >
-                    {activeAlerts}
-                  </span>
-                )}
+        <nav className="mt-2 flex-1 space-y-2 overflow-y-auto px-2.5 pb-3" aria-label="Main navigation">
+          {NAV_GROUPS.filter((group) => !group.adminOnly || isAdmin).map((group) => {
+            const GroupIcon = group.icon;
+            const items = group.items.map((id) => NAV_ITEMS.find((item) => item.id === id)).filter((item) => item && (!item.adminOnly || isAdmin));
+            if (!items.length) return null;
+            const expanded = expandedGroups[group.id];
+            return <div key={group.id}>
+              <button type="button" onClick={() => setExpandedGroups((old) => ({ ...old, [group.id]: !old[group.id] }))} title={collapsed ? group.label : undefined} aria-expanded={Boolean(expanded)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wider spu-text-muted hover:bg-[var(--bg-hover)]">
+                <GroupIcon className="h-3.5 w-3.5 shrink-0" />
+                {!collapsed && <><span className="flex-1">{group.label}</span>{expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</>}
               </button>
-            );
+              {expanded && <div className="mt-0.5 space-y-0.5">{items.map((item) => {
+                const Icon = item.icon;
+                const isActive = activePage === item.id;
+                return <button key={item.id} type="button" onClick={() => { onNavigate(item.id); if (onCloseMobile) onCloseMobile(); }} title={collapsed ? item.label : undefined} aria-current={isActive ? 'page' : undefined} style={isActive ? { background: 'var(--bg-active-nav)', color: 'var(--accent-cyan)', borderLeft: '3px solid var(--accent-cyan)' } : { borderLeft: '3px solid transparent' }} className={`group flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-[12px] font-medium transition-colors ${isActive ? 'font-semibold' : 'spu-text-secondary hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'}`}>
+                  <span className="flex items-center gap-3 truncate"><Icon className={`h-4 w-4 shrink-0 ${isActive ? 'text-[var(--accent-cyan)]' : 'opacity-80 group-hover:opacity-100'}`} />{!collapsed && <span className="truncate">{item.label}</span>}</span>
+                  {item.showAlertBadge && activeAlerts > 0 && <span className={`inline-flex items-center justify-center rounded-full bg-rose-500 font-bold text-white ${collapsed ? 'h-4 min-w-[16px] px-1 text-[9px]' : 'h-5 min-w-[20px] px-1.5 text-[10px]'}`}>{activeAlerts}</span>}
+                </button>;
+              })}</div>}
+            </div>;
           })}
         </nav>
       </div>

@@ -180,7 +180,7 @@ class Phase3To7Tests(unittest.TestCase):
         self._override_admin()
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "fake-gemini-key", "GEMINI_MODEL": "gemini-2.5-flash"}), patch(
-            "app.gemini_service.genai.Client",
+            "app.llm_service.genai.Client",
             return_value=_FakeGeminiClient("## Observed Telemetry\nNodes nominal.\n## Hypotheses\nNone."),
         ):
             r_chat = self.client.post(

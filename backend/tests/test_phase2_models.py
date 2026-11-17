@@ -57,12 +57,16 @@ class Phase2ModelsTests(unittest.TestCase):
         }
         cls.orig_v7 = orchestrator.v7
         cls.orig_lstm = orchestrator.lstm_v8
+        cls.orig_connector_mode = orchestrator.connector.mode
+        cls.orig_connector_mode_explicit = orchestrator.connector.mode_explicitly_set
         cls.client = TestClient(app)
 
     @classmethod
     def tearDownClass(cls) -> None:
         orchestrator.v7 = cls.orig_v7
         orchestrator.lstm_v8 = cls.orig_lstm
+        orchestrator.connector.mode = cls.orig_connector_mode
+        orchestrator.connector.mode_explicitly_set = cls.orig_connector_mode_explicit
         cls.client.close()
         app.dependency_overrides.clear()
         database.DB_PATH = cls._orig_db_path
@@ -181,6 +185,10 @@ class Phase2ModelsTests(unittest.TestCase):
             self.assertEqual(r2.status_code, 200)
             self.assertEqual(r2.json()["status"], "connected")
 
+        # Make the fixture deterministic even if a local Prometheus server is reachable.
+        orchestrator.connector.mode = "live_cluster_sim"
+        orchestrator.connector.mode_explicitly_set = True
+        orchestrator.latest_snapshot = {}
         snap = self.client.get("/api/state").json()
         self.assertEqual(snap["kpis"]["nodes_with_v7_anomaly"], 1)
         self.assertEqual(snap["kpis"]["nodes_with_lstm_warning"], 1)

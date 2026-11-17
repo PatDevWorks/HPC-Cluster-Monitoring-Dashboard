@@ -8,11 +8,12 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 import logging
+import re
 from pathlib import Path
 import statistics
 import tempfile
 from .auth_routes import router as auth_router
-from typing import Any, Deque, Dict, List, Optional, Set
+from typing import Any, Deque, Dict, List, Literal, Optional, Set
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -29,6 +30,7 @@ from .config import (
     GEMINI_MODEL,
     AUTH_COOKIE_NAME,
 )
+
 from .auth_dependencies import get_current_user, require_roles
 from .auth_service import get_session_user, record_auth_event
 from .email_service import EmailDeliveryError, send_transactional_email
@@ -36,11 +38,17 @@ from .evaluation_service import compute_model_comparison_summary
 from .database import (
     add_system_log,
     append_gemini_message,
+    cleanup_model_observations,
     auto_resolve_stale_offline_prometheus_episodes,
     backup_database_to_file,
     clear_all_runtime_records,
     create_experiment,
+    create_ai_conversation,
+    clear_ai_conversation,
+    delete_ai_conversation,
     delete_experiment,
+    ensure_ai_conversation,
+    get_ai_conversation,
     get_ai_report,
     get_app_settings,
     get_roi_totals,
@@ -52,8 +60,11 @@ from .database import (
     list_episodes,
     list_experiments,
     list_gemini_messages,
+    list_ai_conversations,
     list_model_observations,
     list_slurm_audit,
+    get_slurm_job_submission,
+    list_slurm_job_submission_ids,
     list_system_logs,
     list_terminal_audit,
     query_telemetry_history,
@@ -62,8 +73,11 @@ from .database import (
     record_telemetry_batch,
     record_terminal_audit,
     save_ai_report,
+    save_slurm_job_submission,
     update_ai_report,
     update_app_settings,
+    rename_ai_conversation,
+    set_ai_conversation_provider,
     update_auth_user,
     update_episode_status,
     update_experiment,
@@ -92,9 +106,13 @@ from .gemini_service import (
     generate_ai_report,
     test_gemini_connection,
 )
+from .llm_service import LLMConfigurationError, LLMProviderError, provider_status, test_provider
 from .reports_service import build_report_data, export_report_csv, export_report_pdf
-from .slurm_service import execute_slurm_cancel_job, node_id_aliases, sanitize_reason
+from .slurm_service import execute_slurm_cancel_job, execute_slurm_submit_job, node_id_aliases, sanitize_reason
 from .ssh_bridge import get_ssh_public_status, validate_safe_identifier
+from .gemini_intelligence_router import router as gemini_router
+from .incident_service import router as incident_router
+from .model_registry_router import router as model_registry_router
 from .terminal_service import TERMINAL_PRESET_GROUPS, execute_instance_terminal_command
 logger = logging.getLogger(__name__)
 
@@ -150,6 +168,10 @@ class JobCancelRequest(BaseModel):
     reason: str = "Cancelled by administrator"
 
 
+class JobSubmitRequest(BaseModel):
+    script: str = Field(min_length=1, max_length=131072)
+
+
 class FaultInjectRequest(BaseModel):
     node_id: str
     fault_type: str
@@ -192,6 +214,17 @@ class AIChatRequest(BaseModel):
     question: str
     session_id: str = "default"
     range_minutes: int = Field(default=60, ge=5, le=10080)
+    provider: Literal["gemini", "openai", "groq"] = "gemini"
+
+
+class AIConversationCreateRequest(BaseModel):
+    provider: Literal["gemini", "openai", "groq"] = "gemini"
+    title: str = Field(default="New conversation", min_length=1, max_length=120)
+
+
+class AIConversationUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    provider: Optional[Literal["gemini", "openai", "groq"]] = None
 
 
 class AIInvestigateRequest(BaseModel):
@@ -199,12 +232,14 @@ class AIInvestigateRequest(BaseModel):
     node_id: Optional[str] = None
     question: str = "Investigate the detected anomaly or incident and summarize next checks."
     session_id: str = "default"
+    provider: Literal["gemini", "openai", "groq"] = "gemini"
 
 
 class AIAnalyticsQueryRequest(BaseModel):
     question: str
     range_key: str = "24h"
     session_id: str = "default"
+    provider: Literal["gemini", "openai", "groq"] = "gemini"
 
 
 class UserUpdateRequest(BaseModel):
@@ -557,7 +592,7 @@ class PipelineOrchestrator:
                             try:
                                 send_transactional_email(
                                     to_email=rec,
-                                    subject=f"[HPC AIOps {ep['priority']}] {ep['title']}",
+                                    subject=f"[HPC Predictive Monitoring {ep['priority']}] {ep['title']}",
                                     html_content=(
                                         f"<h3>{ep['title']}</h3>"
                                         f"<p><strong>Node:</strong> {ep['node_id']} | "
@@ -659,6 +694,7 @@ class PipelineOrchestrator:
                 for alias in node_id_aliases(str(key_src)):
                     node_lookup.setdefault(alias, n)
         enriched_jobs = []
+        resubmittable_job_ids = list_slurm_job_submission_ids()
         active_slurm_jobs = 0
         pending_slurm_jobs = 0
         failed_slurm_jobs = 0
@@ -699,6 +735,7 @@ class PipelineOrchestrator:
                 for nid in job_nodes
             )
             jc["at_risk_nodes"] = affected_nodes
+            jc["resubmittable"] = str(jc.get("job_id", "")) in resubmittable_job_ids
             jc["node_impact_status"] = (
                 "affected" if has_critical else ("degraded" if affected_nodes else "normal")
             )
@@ -816,6 +853,11 @@ orchestrator = PipelineOrchestrator()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    try:
+        retention_days = get_app_settings().get("model_observation_retention_days", 30)
+        cleanup_model_observations(int(retention_days))
+    except Exception:
+        logger.exception("Could not clean expired model observations.")
     orchestrator.sync_interval_from_settings()
 
     add_system_log(
@@ -827,7 +869,7 @@ async def lifespan(_app: FastAPI):
         severity="INFO",
         event_type="startup",
         message=(
-            "Sol Plaatje A Dev Cluster Dashboard v2.0 online. "
+            "HPC Predictive Monitoring Dashboard v2.0 online. "
             "Real-time telemetry & ML pipeline initialized."
         ),
     )
@@ -897,7 +939,13 @@ app = FastAPI(
     version=APP_METADATA["version"],
     lifespan=lifespan,
 )
+app.state.orchestrator = orchestrator
+
+# Register application routers
 app.include_router(auth_router)
+app.include_router(gemini_router)
+app.include_router(incident_router)
+app.include_router(model_registry_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -918,7 +966,7 @@ app.add_middleware(
 def health_check() -> Dict[str, str]:
     return {
         "status": "healthy",
-        "service": "HPC AI Operations Dashboard API",
+        "service": "HPC Predictive Monitoring Dashboard API",
     }
 
 
@@ -1245,6 +1293,48 @@ async def slurm_cancel_job_endpoint(req: JobCancelRequest) -> Dict[str, Any]:
     snap = orchestrator.step_once()
     await orchestrator.broadcast(snap)
     return outcome
+
+
+async def _submit_and_record_job(script: str, parent_job_id: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        outcome = execute_slurm_submit_job(script)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    save_slurm_job_submission(outcome["job_id"], script, parent_job_id)
+    record_slurm_action(
+        node_id=f"job-{outcome['job_id']}",
+        action="SUBMIT_JOB" if parent_job_id is None else "RESUBMIT_JOB",
+        reason=f"Submitted from dashboard" + (f" based on job {parent_job_id}" if parent_job_id else ""),
+        jobs_protected=0,
+        core_hours_saved=0.0,
+        kwh_saved=0.0,
+        executed_mode=outcome["source"],
+    )
+    orchestrator.connector.invalidate_slurm_cache()
+    snap = orchestrator.step_once()
+    await orchestrator.broadcast(snap)
+    return {**outcome, "parent_job_id": parent_job_id}
+
+
+@app.post("/api/slurm/submit", dependencies=[Depends(require_admin_role)])
+async def slurm_submit_job_endpoint(req: JobSubmitRequest) -> Dict[str, Any]:
+    """Submit a dashboard-provided sbatch script; future resubmissions use this saved copy."""
+    return await _submit_and_record_job(req.script)
+
+
+@app.post("/api/slurm/jobs/{job_id}/resubmit", dependencies=[Depends(require_admin_role)])
+async def slurm_resubmit_job_endpoint(job_id: str) -> Dict[str, Any]:
+    if not re.fullmatch(r"[0-9]{1,24}(?:_[0-9]{1,10})?", job_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid Slurm Job ID format")
+    saved = get_slurm_job_submission(job_id)
+    if not saved:
+        raise HTTPException(
+            status_code=404,
+            detail="This job has no saved submission script. Only jobs submitted through the dashboard can be resubmitted.",
+        )
+    return await _submit_and_record_job(saved["script"], parent_job_id=job_id)
 
 
 @app.get(
@@ -1904,6 +1994,7 @@ def get_settings_endpoint() -> Dict[str, Any]:
                 "configured": bool(GEMINI_API_KEY),
                 "model": GEMINI_MODEL,
             },
+            "llm_providers": provider_status(),
         },
     }
 
@@ -2119,16 +2210,85 @@ def _build_gemini_live_evidence(
     }
 
 
+def _summarize_ai_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact provenance references for an assistant answer, not an interpretation."""
+    return {
+        "timestamp_utc": evidence.get("timestamp_utc"),
+        "data_mode": evidence.get("mode"),
+        "nodes": [n.get("node_id") for n in evidence.get("nodes", []) if n.get("node_id")],
+        "incident_ids": [e.get("id") for e in evidence.get("active_incidents", []) if e.get("id") is not None],
+        "slurm_job_ids": [j.get("job_id") for j in evidence.get("slurm_jobs", []) if j.get("job_id") is not None],
+        "v7_observation_count": len(evidence.get("recent_v7_observations", [])),
+        "lstm_v8_observation_count": len(evidence.get("recent_lstm_observations", [])),
+        "telemetry_sample_count": len(evidence.get("telemetry_window_samples", [])),
+    }
+
+
 @app.get("/api/ai/history")
 def get_ai_chat_history(
     session_id: Optional[str] = Query("default"),
     limit: int = Query(80, ge=1, le=200),
     current_user: Dict[str, Any] = Depends(require_authenticated_user),
 ) -> Dict[str, Any]:
+    email = current_user.get("email", "")
+    conversation = get_ai_conversation(session_id, email) if session_id else None
     return {
         "session_id": session_id,
-        "messages": list_gemini_messages(session_id=session_id, limit=limit),
+        "conversation": conversation,
+        "messages": list_gemini_messages(session_id=session_id, limit=limit, user_email=email),
     }
+
+
+@app.get("/api/ai/conversations")
+def get_ai_conversations_endpoint(
+    search: Optional[str] = Query(None, max_length=100),
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    return {"conversations": list_ai_conversations(current_user.get("email", ""), search)}
+
+
+@app.post("/api/ai/conversations", status_code=201)
+def create_ai_conversation_endpoint(
+    req: AIConversationCreateRequest,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    return create_ai_conversation(current_user.get("email", ""), req.provider, req.title)
+
+
+@app.patch("/api/ai/conversations/{session_id}")
+def update_ai_conversation_endpoint(
+    session_id: str,
+    req: AIConversationUpdateRequest,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    email = current_user.get("email", "")
+    if req.title is None and req.provider is None:
+        raise HTTPException(status_code=422, detail="Provide a conversation title or provider to update.")
+    if req.title is not None and not rename_ai_conversation(session_id, email, req.title):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    if req.provider is not None and not set_ai_conversation_provider(session_id, email, req.provider):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"updated": True, "conversation": get_ai_conversation(session_id, email)}
+
+
+@app.delete("/api/ai/conversations/{session_id}/messages")
+def clear_ai_conversation_endpoint(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    if not clear_ai_conversation(session_id, current_user.get("email", "")):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"cleared": True}
+
+
+@app.delete("/api/ai/conversations/{session_id}")
+def delete_ai_conversation_endpoint(
+    session_id: str,
+    current_user: Dict[str, Any] = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
+    if not delete_ai_conversation(session_id, current_user.get("email", "")):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return {"deleted": True}
 
 
 @app.post("/api/ai/chat")
@@ -2138,31 +2298,30 @@ def ai_chat_endpoint(
 ) -> Dict[str, Any]:
     snap = orchestrator.latest_snapshot or orchestrator.step_once()
     evidence = _build_gemini_live_evidence(snap, range_minutes=req.range_minutes)
-    history = list_gemini_messages(session_id=req.session_id, limit=20)
+    user_email = current_user.get("email", "")
+    ensure_ai_conversation(req.session_id, user_email, req.provider)
+    set_ai_conversation_provider(req.session_id, user_email, req.provider)
+    history = list_gemini_messages(session_id=req.session_id, limit=20, user_email=user_email)
     try:
         res = generate_ai_interaction(
             mode="chat",
             question=req.question,
             evidence=evidence,
             conversation_history=history,
+            provider=req.provider,
         )
     except GeminiConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except (ValueError, GeminiGenerationError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=getattr(exc, "status_code", 502), detail=str(exc))
 
-    user_email = current_user.get("email", "")
     append_gemini_message(req.session_id, user_email, "user", "chat", req.question, {"range_minutes": req.range_minutes})
-    append_gemini_message(req.session_id, user_email, "assistant", "chat", res["answer"], {"model": res["model"]})
+    evidence_summary = _summarize_ai_evidence(evidence)
+    append_gemini_message(req.session_id, user_email, "assistant", "chat", res["answer"], {"model": res["model"], "provider": res["provider_key"], "evidence_summary": evidence_summary})
     return {
         **res,
         "session_id": req.session_id,
-        "evidence_summary": {
-            "timestamp_utc": evidence["timestamp_utc"],
-            "nodes_count": len(evidence["nodes"]),
-            "incidents_count": len(evidence["active_incidents"]),
-            "slurm_jobs_count": len(evidence["slurm_jobs"]),
-        },
+        "evidence_summary": evidence_summary,
     }
 
 
@@ -2180,6 +2339,9 @@ def ai_investigate_incident_endpoint(
     target_node = req.node_id or (target_episode.get("node_id") if target_episode else None)
     evidence = _build_gemini_live_evidence(snap, range_minutes=120, target_node_id=target_node)
     evidence["target_episode"] = target_episode
+    user_email = current_user.get("email", "")
+    ensure_ai_conversation(req.session_id, user_email, req.provider)
+    history = list_gemini_messages(session_id=req.session_id, limit=20, user_email=user_email)
 
     if target_node:
         try:
@@ -2193,20 +2355,21 @@ def ai_investigate_incident_endpoint(
             mode="incident_investigation",
             question=req.question,
             evidence=evidence,
+            conversation_history=history,
+            provider=req.provider,
         )
     except GeminiConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except (ValueError, GeminiGenerationError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=getattr(exc, "status_code", 502), detail=str(exc))
 
-    user_email = current_user.get("email", "")
     append_gemini_message(
         req.session_id,
         user_email,
         "user",
         "incident_investigation",
         f"[Episode #{req.episode_id or '-'} / Node {target_node or 'cluster'}] {req.question}",
-        {"episode_id": req.episode_id, "node_id": target_node},
+        {"episode_id": req.episode_id, "node_id": target_node, "provider": req.provider},
     )
     append_gemini_message(
         req.session_id,
@@ -2214,7 +2377,7 @@ def ai_investigate_incident_endpoint(
         "assistant",
         "incident_investigation",
         res["answer"],
-        {"episode_id": req.episode_id, "node_id": target_node, "model": res["model"]},
+        {"episode_id": req.episode_id, "node_id": target_node, "model": res["model"], "provider": res["provider_key"], "evidence_summary": _summarize_ai_evidence(evidence)},
     )
     return {
         **res,
@@ -2234,24 +2397,30 @@ def ai_analytics_query_endpoint(
     evidence = _build_gemini_live_evidence(snap, range_minutes=minutes)
     evidence["analytics_summary"] = get_performance_analytics_summary(range_key=range_key)
     evidence["model_comparison"] = compute_model_comparison_summary()
+    user_email = current_user.get("email", "")
+    ensure_ai_conversation(req.session_id, user_email, req.provider)
+    history = list_gemini_messages(session_id=req.session_id, limit=20, user_email=user_email)
 
     try:
         res = generate_ai_interaction(
             mode="cluster_analytics",
             question=req.question,
             evidence=evidence,
+            conversation_history=history,
+            provider=req.provider,
         )
     except GeminiConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except (ValueError, GeminiGenerationError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=getattr(exc, "status_code", 502), detail=str(exc))
 
-    user_email = current_user.get("email", "")
     append_gemini_message(req.session_id, user_email, "user", "cluster_analytics", f"[{range_key}] {req.question}", {"range_key": range_key})
-    append_gemini_message(req.session_id, user_email, "assistant", "cluster_analytics", res["answer"], {"range_key": range_key, "model": res["model"]})
+    evidence_summary = _summarize_ai_evidence(evidence)
+    append_gemini_message(req.session_id, user_email, "assistant", "cluster_analytics", res["answer"], {"range_key": range_key, "model": res["model"], "provider": res["provider_key"], "evidence_summary": evidence_summary})
     return {
         **res,
         "range_key": range_key,
+        "evidence_summary": evidence_summary,
     }
 
 
@@ -2261,6 +2430,18 @@ def ai_analytics_query_endpoint(
 )
 def test_gemini_endpoint() -> Dict[str, Any]:
     return test_gemini_connection()
+
+
+@app.get("/api/ai/providers", dependencies=[Depends(require_authenticated_user)])
+def get_ai_provider_status() -> Dict[str, Any]:
+    return {"providers": provider_status()}
+
+
+@app.post("/api/ai/providers/{provider}/test", dependencies=[Depends(require_admin_role)])
+def test_ai_provider(provider: str) -> Dict[str, Any]:
+    if provider not in {"gemini", "openai", "groq"}:
+        raise HTTPException(status_code=404, detail="Unknown LLM provider.")
+    return test_provider(provider)
 
 
 # ---------------------------------------------------------------------------

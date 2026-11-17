@@ -39,6 +39,15 @@ ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")
 # Gemini AI reporting configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+# Intentionally empty until an operator selects a supported model for their account.
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "").strip()
+OPENAI_TIMEOUT_SEC = float(os.getenv("OPENAI_TIMEOUT_SEC", "30"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "").strip()
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip().rstrip("/")
+GROQ_TIMEOUT_SEC = float(os.getenv("GROQ_TIMEOUT_SEC", "30"))
+GROQ_ENABLED = os.getenv("GROQ_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 # Backend-only SSH configuration for remote Slurm & Node Log retrieval.
 # Credentials/key paths are NEVER exposed to the frontend API responses.
 HPC_SSH_HOST = os.getenv("HPC_SSH_HOST", "").strip()
@@ -132,7 +141,7 @@ ALERT_POLICY = {
 }
 
 APP_METADATA = {
-    "name": "Sol Plaatje A Dev Cluster Dashboard",
+    "name": "Sol Plaatje University HPC Predictive Monitoring Dashboard",
     "subtitle": "Monitor • Analyse • Predict • Optimise",
     "version": "2.0.0",
     "organization": "Sol Plaatje University — HPC Student Cluster Competition Team",

@@ -55,8 +55,32 @@ export const api = {
       body: JSON.stringify({ email, code }),
     }),
 
+  setFirstLoginPassword: (password) =>
+    request('/api/auth/first-login/password', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+
+  getFirstLoginStatus: () =>
+    request('/api/auth/first-login/status'),
+
+  resendFirstLoginOtp: () =>
+    request('/api/auth/first-login/resend-otp', { method: 'POST' }),
+
+  reissueTemporaryPassword: (user_id) =>
+    request('/api/auth/temporary-password/reissue', {
+      method: 'POST',
+      body: JSON.stringify({ user_id }),
+    }),
+
   getMe: () =>
     request('/api/auth/me'),
+
+  updateProfile: (full_name) =>
+    request('/api/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ full_name }),
+    }),
 
   logout: () =>
     request('/api/auth/logout', {
@@ -159,6 +183,12 @@ export const api = {
         reason,
       }),
     }),
+
+  submitJob: (script) =>
+    request('/api/slurm/submit', { method: 'POST', body: JSON.stringify({ script }) }),
+
+  resubmitJob: (job_id) =>
+    request(`/api/slurm/jobs/${encodeURIComponent(job_id)}/resubmit`, { method: 'POST' }),
 
   getSlurmAudit: () =>
     request('/api/slurm/audit'),
@@ -363,6 +393,26 @@ export const api = {
 
   // AI Models — V7 Isolation Forest, LSTM V8 & Evaluation
 
+  getModelRegistry: () => request('/api/models/registry'),
+  getModelSummary: () => request('/api/models/summary'),
+  getModelHealth: () => request('/api/models/health'),
+  getModelObservations: (filters = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== null && value !== undefined && value !== '') q.set(key, String(value));
+    });
+    return request(`/api/models/observations${q.size ? `?${q.toString()}` : ''}`);
+  },
+  getModelRetention: () => request('/api/models/retention'),
+  updateModelRetention: (retention_days) => request('/api/models/retention', {
+    method: 'PUT',
+    body: JSON.stringify({ retention_days }),
+  }),
+  registerModel: (model) => request('/api/models/registry', {
+    method: 'POST',
+    body: JSON.stringify(model),
+  }),
+
   getModelsStatus: () =>
     request('/api/models/status'),
 
@@ -420,13 +470,37 @@ export const api = {
   getAiHistory: (sessionId = 'default', limit = 80) =>
     request(`/api/ai/history?session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
-  aiChat: (question, sessionId = 'default', rangeMinutes = 60) =>
+  getAiConversations: (search = '') => {
+    const query = search ? `?search=${encodeURIComponent(search)}` : '';
+    return request(`/api/ai/conversations${query}`);
+  },
+
+  createAiConversation: (provider = 'gemini', title = 'New conversation') =>
+    request('/api/ai/conversations', {
+      method: 'POST',
+      body: JSON.stringify({ provider, title }),
+    }),
+
+  updateAiConversation: (sessionId, payload) =>
+    request(`/api/ai/conversations/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+
+  clearAiConversation: (sessionId) =>
+    request(`/api/ai/conversations/${encodeURIComponent(sessionId)}/messages`, { method: 'DELETE' }),
+
+  deleteAiConversation: (sessionId) =>
+    request(`/api/ai/conversations/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
+
+  aiChat: (question, sessionId = 'default', rangeMinutes = 60, provider = 'gemini') =>
     request('/api/ai/chat', {
       method: 'POST',
       body: JSON.stringify({
         question,
         session_id: sessionId,
         range_minutes: rangeMinutes,
+        provider,
       }),
     }),
 
@@ -436,15 +510,21 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  aiQueryAnalytics: (question, rangeKey = '24h', sessionId = 'default') =>
+  aiQueryAnalytics: (question, rangeKey = '24h', sessionId = 'default', provider = 'gemini') =>
     request('/api/ai/query-analytics', {
       method: 'POST',
       body: JSON.stringify({
         question,
         range_key: rangeKey,
         session_id: sessionId,
+        provider,
       }),
     }),
+
+  getAiProviders: () => request('/api/ai/providers'),
+
+  testAiProvider: (provider) =>
+    request(`/api/ai/providers/${encodeURIComponent(provider)}/test`, { method: 'POST' }),
 
   testGeminiConnection: () =>
     request('/api/ai/test', { method: 'POST' }),

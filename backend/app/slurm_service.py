@@ -306,3 +306,19 @@ def execute_slurm_cancel_job(job_id: str, reason: str = "Cancelled by administra
         "source": src,
         "detail": out or "Job cancellation dispatched",
     }
+
+
+def execute_slurm_submit_job(script: str) -> Dict[str, Any]:
+    """Submit a validated job script via stdin, avoiding temporary script files."""
+    if not script or not script.strip() or len(script.encode("utf-8")) > 131072:
+        raise ValueError("Job script must contain 1 to 131072 UTF-8 bytes")
+    ok, out, src = execute_restricted_cluster_command(
+        ["sbatch", "--parsable"],
+        target_node_ip="localhost",
+        timeout_sec=20.0,
+        input_text=script,
+    )
+    match = re.search(r"(?:^|\n)(\d{1,24}(?:_[0-9]{1,10})?)(?:;[^\r\n]*)?\s*$", out or "")
+    if not ok or not match:
+        raise RuntimeError((out or "Slurm submission failed")[:300])
+    return {"job_id": match.group(1), "source": src, "submitted": True}

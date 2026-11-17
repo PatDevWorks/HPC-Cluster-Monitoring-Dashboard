@@ -9,16 +9,16 @@
   --bg-card-alt: #0f1a30;
   --bg-input: #080f1e;
   --bg-hover: rgba(30, 41, 59, 0.55);
-  --bg-active-nav: linear-gradient(90deg, rgba(6, 182, 212, 0.18) 0%, rgba(14, 116, 144, 0.04) 100%);
+  --bg-active-nav: linear-gradient(90deg, rgba(20, 184, 166, 0.18) 0%, rgba(15, 118, 110, 0.05) 100%);
   --bg-log: #050913;
   --border-subtle: #16243d;
   --border-strong: #23385c;
   --text-primary: #f1f5f9;
   --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent-cyan: #22d3ee;
-  --accent-cyan-strong: #06b6d4;
-  --accent-blue: #3b82f6;
+  --text-muted: #8191a9;
+  --accent-cyan: #5eead4;
+  --accent-cyan-strong: #0f766e;
+  --accent-blue: #60a5fa;
   --status-ok: #10b981;
   --status-warn: #f59e0b;
   --status-crit: #ef4444;
@@ -33,15 +33,15 @@
   --bg-card-alt: #f8fafc;
   --bg-input: #f8fafc;
   --bg-hover: #f1f5f9;
-  --bg-active-nav: linear-gradient(90deg, rgba(2, 132, 199, 0.12) 0%, rgba(2, 132, 199, 0.02) 100%);
+  --bg-active-nav: linear-gradient(90deg, rgba(15, 118, 110, 0.12) 0%, rgba(15, 118, 110, 0.025) 100%);
   --bg-log: #f8fafc;
   --border-subtle: #dbe3ef;
   --border-strong: #cbd5e1;
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-muted: #64748b;
-  --accent-cyan: #0284c7;
-  --accent-cyan-strong: #0369a1;
+  --accent-cyan: #0f766e;
+  --accent-cyan-strong: #0f766e;
   --accent-blue: #2563eb;
   --status-ok: #059669;
   --status-warn: #d97706;
@@ -128,6 +128,24 @@
 
 .spu-border {
   border-color: var(--border-subtle);
+}
+
+/* Dense telemetry labels were below comfortable dashboard reading size. */
+@layer utilities {
+  .text-\[9px\] {
+    font-size: 0.6875rem;
+    line-height: 1rem;
+  }
+
+  .text-\[10px\] {
+    font-size: 0.75rem;
+    line-height: 1.125rem;
+  }
+
+  .text-\[11px\] {
+    font-size: 0.8125rem;
+    line-height: 1.25rem;
+  }
 }
 
 /* Custom subtle scrollbars */

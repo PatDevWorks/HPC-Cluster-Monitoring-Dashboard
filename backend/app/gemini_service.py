@@ -3,10 +3,8 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from google import genai
-from google.genai import types
-
 from .config import GEMINI_API_KEY, GEMINI_MODEL
+from .llm_service import LLMConfigurationError, LLMProviderError, generate_text, provider_status, test_provider
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +18,10 @@ class GeminiConfigurationError(Exception):
 
 class GeminiGenerationError(Exception):
     """Raised when Gemini report generation fails."""
+
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _resolve_gemini_credentials() -> tuple[str, str]:
@@ -144,42 +146,8 @@ def generate_ai_report(
         )
 
     try:
-        client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(
-                timeout=120000
-            ),
-        )
-
-        prompt = _build_report_prompt(evidence)
-
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=4096,
-                temperature=0.2,
-            ),
-        )
-
-        candidates = response.candidates or []
-
-        if candidates:
-            finish_reason = candidates[0].finish_reason
-            if finish_reason is not None:
-                reason = str(finish_reason).upper()
-                if reason.endswith("MAX_TOKENS"):
-                    raise GeminiGenerationError(
-                        "Gemini reached its output-token limit. "
-                        "The report may be incomplete."
-                    )
-
-        report_text = (response.text or "").strip()
-        if not report_text:
-            raise GeminiGenerationError(
-                "Gemini returned an empty report."
-            )
-
+        result = generate_text("gemini", _build_report_prompt(evidence), model=model, max_output_tokens=4096, temperature=0.2)
+        report_text = result["answer"]
         _validate_report(report_text)
 
         return {
@@ -189,12 +157,12 @@ def generate_ai_report(
             "report_text": report_text,
         }
 
-    except GeminiConfigurationError:
-        raise
-
+    except LLMConfigurationError as exc:
+        raise GeminiConfigurationError(str(exc)) from exc
+    except LLMProviderError as exc:
+        raise GeminiGenerationError(str(exc), exc.status_code) from exc
     except GeminiGenerationError:
         raise
-
     except Exception as exc:
         logger.exception("Gemini report generation failed.")
         raise GeminiGenerationError(
@@ -207,6 +175,7 @@ def _build_interaction_prompt(
     question: str,
     evidence: Dict[str, Any],
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    provider_name: str = "Google Gemini",
 ) -> str:
     mode_focus = {
         "chat": (
@@ -235,13 +204,13 @@ def _build_interaction_prompt(
 
     evidence_json = json.dumps(
         evidence,
-        indent=2,
         default=str,
         allow_nan=False,
+        separators=(",", ":"),
     )
 
     return f"""
-You are the Sol Plaatje University HPC AIOps Assistant powered by Google Gemini.
+You are the Sol Plaatje University HPC Predictive Monitoring Assistant powered by {provider_name}.
 Mode: {mode}
 
 TASK GUIDANCE:
@@ -270,88 +239,114 @@ def generate_ai_interaction(
     question: str,
     evidence: Dict[str, Any],
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    provider: str = "gemini",
 ) -> Dict[str, Any]:
-    """Run an evidence-grounded Gemini interaction for chat, incident investigation, or analytics."""
-    api_key, model = _resolve_gemini_credentials()
-    if not api_key:
-        raise GeminiConfigurationError(
-            "Gemini API key is not configured on the backend (set GEMINI_API_KEY in backend/.env)."
-        )
+    """Run an evidence-grounded interaction using the explicitly selected provider."""
     if not question or not question.strip():
         raise ValueError("Prompt/question cannot be empty.")
 
     try:
-        client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(timeout=90000),
-        )
+        if provider == "groq":
+            evidence = _compact_groq_evidence(evidence)
+            conversation_history = [
+                {"role": item.get("role", "user"), "content": str(item.get("content", ""))[:600]}
+                for item in (conversation_history or [])[-4:]
+            ]
+        provider_label = {"gemini": "Google Gemini", "openai": "OpenAI", "groq": "Groq"}.get(provider, provider.title())
         prompt = _build_interaction_prompt(
             mode=mode,
             question=question,
             evidence=evidence,
             conversation_history=conversation_history,
+            provider_name=provider_label,
         )
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=2048,
-                temperature=0.2,
-            ),
-        )
-        answer = (response.text or "").strip()
-        if not answer:
-            raise GeminiGenerationError("Gemini returned an empty response.")
+        result = generate_text(provider, prompt, max_output_tokens=2048, temperature=0.2)
 
         return {
-            "provider": "Google Gemini",
-            "model": model,
+            "provider": result["provider"],
+            "provider_key": result["provider_key"],
+            "model": result["model"],
             "prompt_version": INTERACTION_PROMPT_VERSION,
             "mode": mode,
-            "answer": answer,
+            "answer": result["answer"],
         }
-    except GeminiConfigurationError:
-        raise
+    except LLMConfigurationError as exc:
+        raise GeminiConfigurationError(str(exc)) from exc
+    except LLMProviderError as exc:
+        raise GeminiGenerationError(str(exc), exc.status_code) from exc
     except GeminiGenerationError:
         raise
     except Exception as exc:
-        logger.exception("Gemini interactive query failed.")
+        logger.exception("LLM interactive query failed for provider %s.", provider)
         raise GeminiGenerationError(
-            f"Gemini request failed ({type(exc).__name__}). Verify GEMINI_API_KEY and GEMINI_MODEL."
+            f"{provider.title()} request failed ({type(exc).__name__}). Check provider configuration and backend logs."
         ) from exc
+
+
+def _compact_groq_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep Groq chat context well below request-size limits without losing key signals."""
+    node_fields = (
+        "node_id", "display_name", "role", "up", "health_status", "slurm_state",
+        "telemetry_age_seconds", "cpu_utilization_percent", "cpu_iowait_percent",
+        "memory_used_percent", "swap_used_percent", "load1", "normalized_load1",
+        "scratch_used_percent", "disk_io_utilization_percent", "network_errors_per_second",
+    )
+    incident_fields = (
+        "id", "node_id", "priority", "status", "fault_class", "title", "summary",
+        "recommended_checks", "start_utc", "last_seen_utc", "alert_points",
+        "max_failure_prob", "max_anomaly_score",
+    )
+    observation_fields = (
+        "node_id", "observation_utc", "score", "threshold", "flagged", "classification",
+    )
+    telemetry_fields = (
+        "timestamp_utc", "node_id", "up", "health_score", "cpu_percent", "iowait_percent",
+        "memory_percent", "swap_percent", "load1", "normalized_load1", "disk_io_percent", "net_err_s",
+    )
+
+    def bounded(value: Any, depth: int = 0) -> Any:
+        if isinstance(value, str):
+            return value[:600]
+        if isinstance(value, dict):
+            if depth >= 2:
+                return "[nested detail omitted]"
+            return {str(key)[:80]: bounded(item, depth + 1) for key, item in list(value.items())[:12]}
+        if isinstance(value, list):
+            return [bounded(item, depth + 1) for item in value[:8]]
+        return value
+
+    def pick(value: Any, fields: tuple) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        return {field: bounded(value[field]) for field in fields if field in value}
+
+    compact_nodes = []
+    for node in evidence.get("nodes", [])[:8]:
+        compact = pick(node, node_fields)
+        for field in ("v7_detection", "lstm_v8_status"):
+            status = node.get(field)
+            if isinstance(status, dict):
+                # These status objects may contain large histories; retain only concise current signals.
+                compact[field] = {
+                    key: bounded(value) for key, value in status.items()
+                    if key in {"enabled", "stale", "is_anomaly", "latest_warning", "latest_score", "threshold", "classification", "last_success_utc", "model_version"}
+                }
+        compact_nodes.append(compact)
+
+    compact = {
+        "timestamp_utc": evidence.get("timestamp_utc"),
+        "mode": evidence.get("mode"),
+        "kpis": bounded(evidence.get("kpis", {})),
+        "nodes": compact_nodes,
+        "slurm_jobs": [pick(job, ("job_id", "name", "user", "partition", "state", "duration", "cpus", "memory_req", "node_count", "nodes", "reason")) for job in evidence.get("slurm_jobs", [])[:15]],
+        "active_incidents": [pick(item, incident_fields) for item in evidence.get("active_incidents", [])[:10]],
+        "recent_v7_observations": [pick(item, observation_fields) for item in evidence.get("recent_v7_observations", [])[:12]],
+        "recent_lstm_observations": [pick(item, observation_fields) for item in evidence.get("recent_lstm_observations", [])[:12]],
+        "telemetry_window_samples": [pick(item, telemetry_fields) for item in evidence.get("telemetry_window_samples", [])[-32:]],
+    }
+    return compact
 
 
 def test_gemini_connection() -> Dict[str, Any]:
     """Lightweight connectivity/configuration check for System Settings without leaking keys."""
-    api_key, model = _resolve_gemini_credentials()
-    if not api_key:
-        return {
-            "configured": False,
-            "reachable": False,
-            "model": model,
-            "detail": "GEMINI_API_KEY is not configured in backend environment.",
-        }
-    try:
-        client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(timeout=15000),
-        )
-        response = client.models.generate_content(
-            model=model,
-            contents="Respond with exactly OK.",
-            config=types.GenerateContentConfig(max_output_tokens=16, temperature=0.0),
-        )
-        txt = (response.text or "").strip()
-        return {
-            "configured": True,
-            "reachable": bool(txt),
-            "model": model,
-            "detail": f"Gemini responded via model {model}." if txt else "Empty response from Gemini.",
-        }
-    except Exception as exc:
-        return {
-            "configured": True,
-            "reachable": False,
-            "model": model,
-            "detail": f"Gemini check failed: {type(exc).__name__}: {str(exc)[:180]}",
-        }
+    return test_provider("gemini")

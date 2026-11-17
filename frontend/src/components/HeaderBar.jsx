@@ -14,6 +14,7 @@ import {
   Sun,
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext.jsx';
+import { api } from '../api.js';
 
 export default function HeaderBar({
   snapshot,
@@ -24,11 +25,16 @@ export default function HeaderBar({
   onTogglePause,
   onOpenFaultLab,
   user,
+  onUserUpdated,
   onLogout,
 }) {
   const { preference, setPreference } = useTheme();
   const [notifOpen, setNotifOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(user?.full_name || '');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMessage, setProfileMessage] = useState('');
 
   const notifRef = useRef(null);
   const profileRef = useRef(null);
@@ -74,6 +80,23 @@ export default function HeaderBar({
     .slice(0, 2)
     .map((part) => part[0].toUpperCase())
     .join('');
+
+  const saveProfileName = async (event) => {
+    event.preventDefault();
+    setProfileSaving(true);
+    setProfileMessage('');
+    try {
+      const result = await api.updateProfile(nameDraft);
+      onUserUpdated?.(result.user);
+      setNameDraft(result.user.full_name);
+      setEditingName(false);
+      setProfileMessage('Name saved.');
+    } catch (error) {
+      setProfileMessage(error.message || 'Could not save your name.');
+    } finally {
+      setProfileSaving(false);
+    }
+  };
 
   // Telemetry connection status
   let sourceText = 'Connecting...';
@@ -126,7 +149,7 @@ export default function HeaderBar({
           <div>
             <div className="flex flex-wrap items-center gap-2.5">
               <h1 className="text-base font-bold tracking-tight sm:text-lg">
-                Sol Plaatje A Dev Cluster Dashboard
+                HPC Predictive Monitoring Dashboard
               </h1>
 
               <span
@@ -279,9 +302,41 @@ export default function HeaderBar({
                     </div>
                   )}
 
+                  <form onSubmit={saveProfileName} className="mt-2">
+                    <label htmlFor="account-display-name" className="mb-1 block text-[11px] font-semibold spu-text-muted">
+                      Account name
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        id="account-display-name"
+                        value={nameDraft}
+                        onChange={(event) => setNameDraft(event.target.value)}
+                        maxLength={120}
+                        disabled={!editingName || profileSaving}
+                        placeholder="Add your name"
+                        className="min-w-0 flex-1 rounded-md border px-2 py-1.5 text-xs spu-border"
+                      />
+                      {editingName ? (
+                        <>
+                          <button type="submit" disabled={profileSaving || !nameDraft.trim()} className="rounded-md bg-cyan-600 px-2 py-1 text-[11px] font-semibold text-white disabled:opacity-50">
+                            {profileSaving ? 'Saving' : 'Save'}
+                          </button>
+                          <button type="button" onClick={() => { setNameDraft(user?.full_name || ''); setEditingName(false); setProfileMessage(''); }} className="rounded-md border px-2 py-1 text-[11px] spu-border">
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" onClick={() => { setNameDraft(user?.full_name || ''); setEditingName(true); setProfileMessage(''); }} className="rounded-md border px-2 py-1 text-[11px] font-semibold spu-border">
+                          Edit
+                        </button>
+                      )}
+                    </div>
+                    {profileMessage && <p className="mt-1 text-[11px] spu-text-muted">{profileMessage}</p>}
+                  </form>
+
                   <div className="mt-2 flex items-center justify-between">
                     <span className="font-semibold">
-                      Sol Plaatje A
+                      Sol Plaatje University
                     </span>
 
                     <span

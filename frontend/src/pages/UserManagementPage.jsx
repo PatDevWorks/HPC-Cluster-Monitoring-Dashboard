@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   MailPlus,
+  KeyRound,
   RefreshCw,
   Shield,
   Users,
@@ -15,7 +16,6 @@ export default function UserManagementPage({
   const [auditLogs, setAuditLogs] = useState({ auth_events: [], slurm_actions: [], terminal_commands: [] });
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('viewer');
-  const [inviteHours, setInviteHours] = useState(48);
   const [loading, setLoading] = useState(false);
 
   const isAdmin = ['admin', 'super_admin'].includes(user?.role);
@@ -65,6 +65,16 @@ export default function UserManagementPage({
       showToast?.(`Updated permissions for ${targetUser.email}`);
     } catch (err) {
       showToast?.(`Update failed: ${err.message}`);
+    }
+  };
+
+  const handleReissueTemporaryPassword = async (targetUser) => {
+    try {
+      const result = await api.reissueTemporaryPassword(targetUser.id);
+      await loadData();
+      showToast?.(result?.message || `Temporary password reissued for ${targetUser.email}`);
+    } catch (err) {
+      showToast?.(`Could not reissue temporary password: ${err.message}`);
     }
   };
 
@@ -128,17 +138,8 @@ export default function UserManagementPage({
               <option value="admin">Admin (Operations &amp; Models)</option>
             </select>
           </div>
-          <div className="flex gap-2">
-            <select
-              value={inviteHours}
-              onChange={(e) => setInviteHours(Number(e.target.value))}
-              className="spu-input w-24 text-xs"
-            >
-              <option value={24}>24h</option>
-              <option value={48}>48h</option>
-              <option value={168}>7d</option>
-            </select>
-            <button type="submit" className="spu-btn-primary flex-1 inline-flex items-center justify-center gap-1.5 text-xs">
+          <div>
+            <button type="submit" className="spu-btn-primary w-full inline-flex items-center justify-center gap-1.5 text-xs">
               <MailPlus className="h-3.5 w-3.5" /> Invite
             </button>
           </div>
@@ -189,12 +190,19 @@ export default function UserManagementPage({
                   {isSuperAdmin && (
                     <td className="py-2.5 pr-4 text-right">
                       {u.id !== user?.id && (
-                        <button
-                          onClick={() => handleUpdateUser(u, { is_active: !u.is_active })}
-                          className="spu-btn-secondary text-[11px] py-1 px-2"
-                        >
-                          {u.is_active ? 'Disable' : 'Enable'}
-                        </button>
+                        <div className="inline-flex gap-2">
+                          {u.first_login_pending && u.is_active && (
+                            <button onClick={() => handleReissueTemporaryPassword(u)} className="spu-btn-secondary inline-flex items-center gap-1 text-[11px] py-1 px-2" title="Invalidate the old temporary password and email a new one">
+                              <KeyRound className="h-3 w-3" /> Reissue
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleUpdateUser(u, { is_active: !u.is_active })}
+                            className="spu-btn-secondary text-[11px] py-1 px-2"
+                          >
+                            {u.is_active ? 'Disable' : 'Enable'}
+                          </button>
+                        </div>
                       )}
                     </td>
                   )}

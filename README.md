@@ -1,7 +1,7 @@
 
-# Sol Plaatje A HPC AIOps Dashboard
+# Sol Plaatje University HPC Predictive Monitoring Dashboard
 
-**HPC Predictive Monitoring and AIOps Platform**
+**HPC Predictive Monitoring Platform**
 
 A monitoring and operational support platform developed for the Sol Plaatje University HPC development cluster. The application brings together cluster telemetry, node health monitoring, workload visibility, diagnostics, alert management, analytics, and machine-learning-assisted anomaly detection.
 
@@ -9,7 +9,7 @@ A monitoring and operational support platform developed for the Sol Plaatje Univ
 
 ## 1. Project Overview
 
-The Sol Plaatje A HPC AIOps Dashboard provides a central interface for observing and analysing the operational state of an HPC cluster.
+The Sol Plaatje University HPC Predictive Monitoring Dashboard provides a central interface for observing and analysing the operational state of an HPC cluster.
 
 It integrates with Prometheus-based monitoring services, processes incoming node metrics, maintains rolling feature information, evaluates node behaviour, and distributes monitoring updates to connected dashboard clients.
 
@@ -523,7 +523,7 @@ The dashboard is an operational support tool and does not replace established HP
 
 ## 17. Project Context
 
-**Project:** Sol Plaatje A HPC AIOps Dashboard
+**Project:** Sol Plaatje University HPC Predictive Monitoring Dashboard
 
 **Institution:** Sol Plaatje University
 
@@ -541,4 +541,4 @@ The dashboard is an operational support tool and does not replace established HP
 
 ---
 
-*Sol Plaatje A HPC AIOps Dashboard - Bringing intelligent monitoring and operational visibility to HPC infrastructure.*
+*Sol Plaatje University HPC Predictive Monitoring Dashboard — Bringing intelligent monitoring and operational visibility to HPC infrastructure.*

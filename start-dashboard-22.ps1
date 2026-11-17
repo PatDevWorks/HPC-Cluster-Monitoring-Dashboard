@@ -2,6 +2,7 @@
 .SYNOPSIS
     Legacy convenience wrapper defaulting SSH port preference to 22 (auto-falls back to 443).
     All secrets must be provided via backend/.env or environment variables (no hardcoded keys).
+    SSH key permission repair and tunnel startup are handled by the shared launcher below.
 #>
 param(
     [string]$SshHost = "",

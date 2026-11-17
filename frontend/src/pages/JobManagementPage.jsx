@@ -29,6 +29,7 @@ import {
   YAxis,
 } from 'recharts';
 import { useTheme } from '../context/ThemeContext.jsx';
+import { api } from '../api.js';
 
 export default function JobManagementPage({
   snapshot,
@@ -36,9 +37,12 @@ export default function JobManagementPage({
   onRequestDrain,
   onRequestResume,
   onRequestCancelJob,
+  showToast,
 }) {
   const { chartTheme } = useTheme();
   const [stateFilter, setStateFilter] = useState('ALL');
+  const [jobScript, setJobScript] = useState('');
+  const [submittingJob, setSubmittingJob] = useState(false);
 
   const jobs = snapshot?.slurm_jobs || [];
   const allNodes = snapshot?.nodes || [];
@@ -124,7 +128,7 @@ export default function JobManagementPage({
           <div>
             <h2 className="text-xl font-bold tracking-tight">Job Management</h2>
             <p className="text-xs spu-text-secondary">
-              Slurm workload scheduler queue, resource allocation and confirmed node controls | Source:{' '}
+              Source:{' '}
               <span className="font-mono">{snapshot?.slurm_source || 'slurm'}</span>
             </p>
           </div>
@@ -175,6 +179,46 @@ export default function JobManagementPage({
             ? `Unavailable (${snapshot.slurm_error})`
             : 'Unavailable - configure Head Node SSH in Settings or launcher'}
         </span>
+      </section>
+
+      <section className="spu-card p-5">
+        <h3 className="mb-2 text-sm font-bold">Submit a Slurm Job</h3>
+        <p className="mb-3 text-xs spu-text-secondary">
+          Paste an sbatch script, including any #SBATCH resource directives. Dashboard submissions are saved so they can be resubmitted later.
+        </p>
+        <form
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (!jobScript.trim()) return;
+            setSubmittingJob(true);
+            try {
+              const result = await api.submitJob(jobScript);
+              setJobScript('');
+              showToast(`Submitted Slurm job #${result.job_id}`);
+            } catch (err) {
+              showToast(`Job submission failed: ${err.message}`);
+            } finally {
+              setSubmittingJob(false);
+            }
+          }}
+        >
+          <textarea
+            value={jobScript}
+            onChange={(event) => setJobScript(event.target.value)}
+            rows={7}
+            maxLength={131072}
+            required
+            placeholder={'#!/bin/bash\n#SBATCH --job-name=my-job\n#SBATCH --partition=compute\n#SBATCH --ntasks=4\n\nsrun ./my-program'}
+            className="w-full rounded-lg border spu-border bg-[var(--bg-base)] p-3 font-mono text-xs"
+          />
+          <button
+            type="submit"
+            disabled={submittingJob || !jobScript.trim()}
+            className="mt-2 rounded bg-cyan-500/20 px-3 py-2 text-xs font-semibold text-cyan-300 disabled:opacity-50"
+          >
+            {submittingJob ? 'Submitting...' : 'Submit Job'}
+          </button>
+        </form>
       </section>
 
       {/* Slurm Queue & History Table */}
@@ -284,6 +328,22 @@ export default function JobManagementPage({
                         </span>
                       </td>
                       <td className="py-2.5 text-right">
+                        {job.resubmittable && (
+                          <button
+                            onClick={async () => {
+                              if (!window.confirm(`Resubmit job #${job.job_id} using its saved script?`)) return;
+                              try {
+                                const result = await api.resubmitJob(job.job_id);
+                                showToast(`Resubmitted as Slurm job #${result.job_id}`);
+                              } catch (err) {
+                                showToast(`Resubmit failed: ${err.message}`);
+                              }
+                            }}
+                            className="mr-1 rounded bg-cyan-500/15 px-2 py-1 text-[10.5px] font-semibold text-cyan-300 hover:bg-cyan-500/25"
+                          >
+                            Resubmit
+                          </button>
+                        )}
                         {(st === 'RUNNING' || st === 'PENDING') && (
                           <button
                             onClick={() => onRequestCancelJob(job)}

@@ -42,7 +42,7 @@ export function ThemeProvider({ children }) {
       isDark,
       grid: isDark ? '#16243d' : '#e2e8f0',
       axis: isDark ? '#94a3b8' : '#475569',
-      cyan: isDark ? '#22d3ee' : '#0284c7',
+      cyan: isDark ? '#5eead4' : '#0f766e',
       blue: isDark ? '#38bdf8' : '#2563eb',
       purple: isDark ? '#a855f7' : '#7c3aed',
       emerald: isDark ? '#10b981' : '#059669',
@@ -52,7 +52,7 @@ export function ThemeProvider({ children }) {
         backgroundColor: isDark ? '#0b1324' : '#ffffff',
         border: `1px solid ${isDark ? '#23385c' : '#cbd5e1'}`,
         borderRadius: '10px',
-        fontSize: '12px',
+        fontSize: '13px',
         color: isDark ? '#f1f5f9' : '#0f172a',
         boxShadow: isDark
           ? '0 8px 24px rgba(0,0,0,0.45)'

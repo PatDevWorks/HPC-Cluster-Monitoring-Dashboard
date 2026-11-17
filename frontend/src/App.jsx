@@ -12,7 +12,7 @@ import AuthPage from './components/AuthPage.jsx';
 import OverviewPage from './pages/OverviewPage.jsx';
 import TopologyPage from './pages/TopologyPage.jsx';
 import LiveMonitoringPage from './pages/LiveMonitoringPage.jsx';
-import AiPredictionsPage from './pages/AiPredictionsPage.jsx';
+import ModelsCentrePage from './pages/ModelsCentrePage.jsx';
 import JobManagementPage from './pages/JobManagementPage.jsx';
 import NodeLogsPage from './pages/NodeLogsPage.jsx';
 import NodeTerminalPage from './pages/NodeTerminalPage.jsx';
@@ -459,6 +459,7 @@ export default function App() {
             onCloseMobile={() => setMobileMenuOpen(false)}
             snapshot={snapshot}
             wsConnected={wsConnected}
+            user={user}
           />
 
           <div className="flex flex-1 flex-col overflow-hidden">
@@ -467,6 +468,7 @@ export default function App() {
               snapshot={snapshot}
               wsConnected={wsConnected}
               user={user}
+              onUserUpdated={setUser}
               onLogout={handleLogout}
               onToggleSidebar={toggleSidebarCollapse}
               onOpenMobileSidebar={() => setMobileMenuOpen(true)}
@@ -493,7 +495,7 @@ export default function App() {
                     <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent-cyan)] border-t-transparent" />
 
                     <p className="text-sm">
-                      Connecting to Sol Plaatje A Dev Cluster Dashboard Backend...
+                      Connecting to HPC Predictive Monitoring Dashboard Backend...
                     </p>
 
                   </div>
@@ -531,7 +533,7 @@ export default function App() {
                     )}
 
                     {activePage === 'predictions' && (
-                      <AiPredictionsPage
+                      <ModelsCentrePage
                         snapshot={snapshot}
                         user={user}
                         selectedNodeId={selectedNodeId}
@@ -560,6 +562,7 @@ export default function App() {
                         onRequestDrain={(node) => promptDrainNode(node)}
                         onRequestResume={(node) => promptResumeNode(node)}
                         onRequestCancelJob={promptCancelJob}
+                        showToast={showToast}
                       />
                     )}
 

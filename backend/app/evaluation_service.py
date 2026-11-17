@@ -6,7 +6,35 @@ from .database import (
     list_experiments,
     list_model_observations,
 )
+from fastapi import APIRouter, HTTPException
+from typing import Optional
+from .database import get_conn
 
+router = APIRouter(prefix="/api/observability", tags=["Model Observability"])
+
+@router.get("/metrics")
+def get_model_observability_metrics(model_name: Optional[str] = None, days: int = 7):
+    """
+    Retrieves aggregated model evaluation metrics, detection trends,
+    and historical observation counts for V7 and V8 models.
+    """
+    conn = get_conn()
+    try:
+        query = """
+            SELECT model_name, node_id, COUNT(*) as total_observations,
+                   SUM(flagged) as total_flagged,
+                   AVG(score) as avg_score,
+                   MAX(score) as max_score
+            FROM model_score_observations
+            GROUP BY model_name, node_id
+        """
+        rows = conn.execute(query).fetchall()
+        return {
+            "time_window_days": days,
+            "metrics": [dict(row) for row in rows]
+        }
+    finally:
+        conn.close()
 
 def _parse_dt(iso_str: Optional[str]) -> Optional[datetime]:
     if not iso_str:

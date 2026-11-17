@@ -201,7 +201,7 @@ def retrieve_node_logs(
 
 def format_log_entries_as_text(log_payload: Dict[str, Any]) -> str:
     header = [
-        f"# Sol Plaatje A Dev Cluster Dashboard — Log Export",
+        f"# HPC Predictive Monitoring Dashboard — Log Export",
         f"# Node: {log_payload['node_id']} | Category: {log_payload['category_label']}",
         f"# Source Mode: {log_payload['source_mode']} | Exported UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
         "#" + "-" * 78,
@@ -260,7 +260,7 @@ def build_node_diagnostic_bundle_zip(
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         manifest = {
             "bundle_type": "single_node_diagnostic",
-            "platform": "Sol Plaatje A Dev Cluster Dashboard",
+            "platform": "HPC Predictive Monitoring Dashboard",
             "generated_utc": now_iso,
             "node_id": node_id,
             "sanitized": True,
@@ -291,7 +291,7 @@ def build_cluster_diagnostic_bundle_zip(snapshot: Dict[str, Any]) -> bytes:
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         summary = {
             "bundle_type": "cluster_wide_diagnostic",
-            "platform": "Sol Plaatje A Dev Cluster Dashboard",
+            "platform": "HPC Predictive Monitoring Dashboard",
             "generated_utc": now_iso,
             "data_mode": snapshot.get("mode"),
             "cluster_health_score": snapshot.get("kpis", {}).get("cluster_health_score"),

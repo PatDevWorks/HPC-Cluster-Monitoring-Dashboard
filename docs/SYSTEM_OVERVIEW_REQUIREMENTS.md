@@ -1,6 +1,6 @@
 ﻿# System Overview and Requirements
 
-**Project:** Sol Plaatje A HPC AIOps Dashboard  
+**Project:** Sol Plaatje University HPC Predictive Monitoring Dashboard  
 **Document basis:** Repository inspection, 14 November 2026  
 **Status:** As-built description; requirements are derived from current implementation.
 
